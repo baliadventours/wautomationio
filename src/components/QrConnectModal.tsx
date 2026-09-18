@@ -58,13 +58,13 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
       } else if (qrData?.code) {
         try {
           const url = await QRCode.toDataURL(qrData.code, {
-            width: 280,
+            width: 320,
             margin: 2,
             color: {
               dark: '#000000',
               light: '#ffffff',
             },
-            errorCorrectionLevel: 'M',
+            errorCorrectionLevel: 'L',
           });
           setGeneratedQrUrl(url);
         } catch (e) {
@@ -75,14 +75,15 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
     generateQrImage();
   }, [qrData]);
 
-  // 2. Poll for connection state every 3 seconds
+  // 2. Poll for connection state every 2.5 seconds using lightweight /status
+  // NOTE: Never poll /connect, because calling /connect on Baileys resets the QR token!
   useEffect(() => {
     if (!isPolling || isConnected) return;
 
     const interval = setInterval(async () => {
       try {
         setPollCount((prev) => prev + 1);
-        const res = await fetch(`/api/instances/${instance.id}/connect`);
+        const res = await fetch(`/api/instances/${instance.id}/status`);
         if (!res.ok) return;
 
         const data = await res.json();
@@ -99,21 +100,21 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
           setTimeout(() => {
             onSuccess(updated);
           }, 1200);
-        } else if (data.qr) {
-          setQrData(data.qr);
-          const rawCode = data.qr.pairingCode || "";
-          const isRealPairing = rawCode && rawCode.length <= 10 && !rawCode.includes("@") && !rawCode.includes("/") && !rawCode.includes("=");
-          if (isRealPairing && !pairingCode) {
-            setPairingCode(rawCode);
-          }
         }
       } catch (err: any) {
         console.error('Polling error:', err);
       }
-    }, 3000);
+    }, 2500);
 
     return () => clearInterval(interval);
-  }, [instance, isPolling, isConnected, onSuccess, phoneNumber, pairingCode]);
+  }, [instance, isPolling, isConnected, onSuccess, phoneNumber]);
+
+  // Initial load of QR if on QR tab and not already provided
+  useEffect(() => {
+    if (!qrData && activeTab === 'qr' && !isConnected) {
+      handleRefreshQr();
+    }
+  }, [activeTab, qrData, isConnected]);
 
   // 3. Request Pairing Code by Phone Number
   const handleRequestPairingCode = async (e?: React.FormEvent) => {

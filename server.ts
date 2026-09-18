@@ -806,6 +806,34 @@ app.get('/api/instances/:id/connect', async (req, res) => {
   }
 });
 
+// 5a. Lightweight status poll (does NOT regenerate or invalidate QR tokens)
+app.get('/api/instances/:id/status', async (req, res) => {
+  try {
+    const tenant = getActiveTenant();
+    const instance = tenant.instances.find((i) => i.id === req.params.id);
+
+    if (!instance) {
+      return res.status(404).json({ error: 'Instance not found' });
+    }
+
+    const stateResult = await evolutionApi.getConnectionState(instance.instance_name);
+
+    if (stateResult.state === 'open' && instance.status !== 'connected') {
+      instance.status = 'connected';
+      instance.phone_number = stateResult.phone || instance.phone_number;
+      instance.connected_at = new Date().toISOString();
+    }
+
+    res.json({
+      status: instance.status,
+      state: stateResult.state,
+      phone: stateResult.phone || instance.phone_number,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 5b. Request WhatsApp 8-digit Pairing Code via Phone Number
 app.post('/api/instances/:id/pairing-code', async (req, res) => {
   try {
