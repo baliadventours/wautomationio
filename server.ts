@@ -723,14 +723,19 @@ app.post('/api/instances', async (req, res) => {
     }
 
     const { friendly_name } = req.body;
-    const shortUserId = tenant.profile.id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8);
+    const cleanLabel = (friendly_name || 'Line')
+      .trim()
+      .replace(/[^a-zA-Z0-9]/g, '')
+      .slice(0, 12);
     const instanceIndex = tenant.instances.length + 1;
-    const instanceName = `tenant_${shortUserId}_${instanceIndex}_${Date.now().toString().slice(-4)}`;
+    const instanceName = `${cleanLabel || 'line'}_${Date.now().toString().slice(-4)}`;
     const instanceToken = crypto.randomBytes(24).toString('hex');
     const encryptedToken = encryptToken(instanceToken);
 
     const appUrl = process.env.APP_URL || `http://localhost:${PORT}`;
     const webhookUrl = `${appUrl.replace(/\/$/, '')}/api/webhook/evolution`;
+
+    console.log(`[API] Creating instance: ${instanceName} (${friendly_name})`);
 
     // 1. Call Evolution API to create instance
     const evoResult = await evolutionApi.createInstance({
@@ -740,6 +745,7 @@ app.post('/api/instances', async (req, res) => {
     });
 
     if (!evoResult.success) {
+      console.error(`[API] Evolution API create failed for ${instanceName}:`, evoResult.error);
       return res.status(502).json({
         error: evoResult.error || 'Failed to initialize instance in Evolution API',
       });

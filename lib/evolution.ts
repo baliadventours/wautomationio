@@ -113,22 +113,13 @@ export class EvolutionApiClient {
     }
 
     try {
+      // Clean, standard instance create payload compatible with Evolution API v1 & v2
       const payload: Record<string, any> = {
         instanceName: params.instanceName,
         token: params.token,
         qrcode: true,
         integration: 'WHATSAPP-BAILEYS',
       };
-
-      if (params.webhookUrl) {
-        payload.webhook = params.webhookUrl;
-        payload.webhook_by_events = false;
-        payload.events = [
-          'CONNECTION_UPDATE',
-          'MESSAGES_UPSERT',
-          'QRCODE_UPDATED',
-        ];
-      }
 
       const res = await fetch(`${this.baseUrl}/instance/create`, {
         method: 'POST',
@@ -138,10 +129,33 @@ export class EvolutionApiClient {
 
       const data = await res.json();
       if (!res.ok) {
+        const errorMsg = Array.isArray(data?.response?.message)
+          ? data.response.message.join(', ')
+          : typeof data?.response?.message === 'string'
+          ? data.response.message
+          : data?.message || data?.error || `HTTP ${res.status}`;
         return {
           success: false,
-          error: data?.response?.message?.[0] || data?.message || `HTTP ${res.status}`,
+          error: errorMsg,
         };
+      }
+
+      // If webhook is provided, configure it separately so it works seamlessly on v1 and v2
+      if (params.webhookUrl) {
+        try {
+          await fetch(`${this.baseUrl}/webhook/set/${params.instanceName}`, {
+            method: 'POST',
+            headers: this.getHeaders(),
+            body: JSON.stringify({
+              enabled: true,
+              url: params.webhookUrl,
+              webhookByEvents: false,
+              events: ['CONNECTION_UPDATE', 'MESSAGES_UPSERT', 'QRCODE_UPDATED'],
+            }),
+          });
+        } catch (_) {
+          // Webhook setting is non-blocking
+        }
       }
 
       return { success: true, data };
