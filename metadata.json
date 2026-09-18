@@ -1,0 +1,6 @@
+{
+  "name": "Wautomation.io - Multi-Tenant WhatsApp SaaS",
+  "description": "Multi-tenant SaaS platform for WhatsApp automation on Evolution API with isolated instances, QR code onboarding, keyword triggers, and usage limits.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

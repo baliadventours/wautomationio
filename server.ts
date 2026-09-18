@@ -1,0 +1,1504 @@
+import express from 'express';
+import path from 'path';
+import crypto from 'crypto';
+import dotenv from 'dotenv';
+import { createServer as createViteServer } from 'vite';
+import { evolutionApi } from './lib/evolution';
+import { encryptToken, decryptToken } from './lib/encryption';
+import { checkRateLimit } from './lib/rate-limit';
+import { supabaseAdmin, isServerSupabaseConfigured } from './lib/supabase/server';
+import {
+  WhatsAppInstance,
+  MessageLog,
+  Automation,
+  Subscription,
+  UserProfile,
+} from './src/types';
+
+dotenv.config();
+
+const app = express();
+const PORT = 3000;
+
+app.use(express.json());
+
+// ---------------------------------------------------------------------------
+// In-Memory Fallback State (when Supabase is not connected in dev/preview)
+// ---------------------------------------------------------------------------
+interface TenantState {
+  profile: UserProfile & { status?: 'active' | 'suspended' };
+  subscription: Subscription;
+  instances: WhatsAppInstance[];
+  messages: MessageLog[];
+  automations: Automation[];
+}
+
+interface UserSession {
+  token: string;
+  userId: string;
+  email: string;
+  role: 'superadmin' | 'tenant';
+  createdAt: number;
+  expiresAt: number;
+}
+
+const activeSessions = new Map<string, UserSession>();
+
+const userCredentials: Record<string, { password: string; role: 'superadmin' | 'tenant'; tenantId: string }> = {
+  'baliadventours@gmail.com': { password: 'admin', role: 'superadmin', tenantId: 'superadmin-root' },
+  'admin@wautomation.io': { password: 'admin', role: 'superadmin', tenantId: 'superadmin-root' },
+  'admin@wapilot.io': { password: 'admin', role: 'superadmin', tenantId: 'superadmin-root' },
+  'alex@balitours.com': { password: 'password', role: 'tenant', tenantId: 'tenant-demo-user-1' },
+  'sarah@globalboutique.io': { password: 'password', role: 'tenant', tenantId: 'tenant-demo-user-2' },
+};
+
+let activeTenantId = 'tenant-demo-user-1';
+
+let subscriptionPackages = [
+  {
+    id: 'pkg_starter',
+    plan: 'starter' as const,
+    name: 'Starter',
+    priceMonthly: 29,
+    instance_limit: 1,
+    message_limit: 1000,
+    description: 'Perfect for single businesses connecting one WhatsApp number.',
+    features: [
+      '1 Dedicated WhatsApp Line',
+      '1,000 Messages per Month',
+      'Keyword Auto-Replies',
+      'Standard Rate Limiting (30/min)',
+    ],
+    isPopular: false,
+  },
+  {
+    id: 'pkg_pro',
+    plan: 'pro' as const,
+    name: 'Pro Multi-Line',
+    priceMonthly: 79,
+    instance_limit: 3,
+    message_limit: 5000,
+    description: 'For growing sales teams and stores managing customer support.',
+    features: [
+      '3 Dedicated WhatsApp Lines',
+      '5,000 Messages per Month',
+      'Unlimited Keyword Automations',
+      'Fast Webhook Priority Queue',
+      'Multi-agent Team Access',
+    ],
+    isPopular: true,
+  },
+  {
+    id: 'pkg_agency',
+    plan: 'agency' as const,
+    name: 'Agency Scale',
+    priceMonthly: 199,
+    instance_limit: 10,
+    message_limit: 25000,
+    description: 'For agencies running marketing automation for multiple clients.',
+    features: [
+      '10 Dedicated WhatsApp Lines',
+      '25,000 Messages per Month',
+      'Dedicated Evolution API Queue',
+      'White-label Tenant Dashboards',
+      'Priority VPS Resources & Support',
+    ],
+    isPopular: false,
+  },
+  {
+    id: 'pkg_enterprise',
+    plan: 'enterprise' as const,
+    name: 'Enterprise Dedicated',
+    priceMonthly: 499,
+    instance_limit: 30,
+    message_limit: 100000,
+    description: 'Custom dedicated VPS node deployment with high-throughput Redis cluster.',
+    features: [
+      '30 Dedicated WhatsApp Lines',
+      '100,000 Messages per Month',
+      'Custom Dedicated VPS Isolation',
+      'Custom Webhook Infrastructure',
+      'SLA 99.9% Uptime Guarantee',
+    ],
+    isPopular: false,
+  },
+];
+
+const mockTenants: Record<string, TenantState> = {
+  'superadmin-root': {
+    profile: {
+      id: 'superadmin-root',
+      email: 'baliadventours@gmail.com',
+      role: 'superadmin',
+      plan: 'enterprise',
+      company_name: 'Wautomation.io Master HQ',
+      status: 'active',
+      created_at: new Date(Date.now() - 90 * 86400000).toISOString(),
+    },
+    subscription: {
+      id: 'sub_root_admin',
+      user_id: 'superadmin-root',
+      plan: 'enterprise',
+      status: 'active',
+      instance_limit: 50,
+      message_limit: 1000000,
+      period_start: new Date(Date.now() - 30 * 86400000).toISOString(),
+      period_end: new Date(Date.now() + 335 * 86400000).toISOString(),
+    },
+    instances: [
+      {
+        id: 'inst_admin_core',
+        user_id: 'superadmin-root',
+        instance_name: 'master_admin_telemetry',
+        status: 'connected',
+        phone_number: '+62 811-0000-9999',
+        connected_at: new Date(Date.now() - 20 * 86400000).toISOString(),
+        evolution_token: encryptToken('evo_token_root_01'),
+        created_at: new Date(Date.now() - 20 * 86400000).toISOString(),
+        updated_at: new Date().toISOString(),
+        profile_name: 'Wautomation.io Master Line',
+      },
+    ],
+    messages: [],
+    automations: [],
+  },
+  'tenant-demo-user-1': {
+    profile: {
+      id: 'tenant-demo-user-1',
+      email: 'alex@balitours.com',
+      role: 'tenant',
+      plan: 'pro',
+      company_name: 'Bali Adventours',
+      status: 'active',
+      created_at: new Date(Date.now() - 30 * 86400000).toISOString(),
+    },
+    subscription: {
+      id: 'sub_demo_1',
+      user_id: 'tenant-demo-user-1',
+      plan: 'pro',
+      status: 'active',
+      instance_limit: 3,
+      message_limit: 5000,
+      period_start: new Date(Date.now() - 12 * 86400000).toISOString(),
+      period_end: new Date(Date.now() + 18 * 86400000).toISOString(),
+    },
+    instances: [
+      {
+        id: 'inst_prod_01',
+        user_id: 'tenant-demo-user-1',
+        instance_name: 'tenant_demo1_support',
+        status: 'connected',
+        phone_number: '+62 812-3456-7890',
+        connected_at: new Date(Date.now() - 5 * 86400000).toISOString(),
+        evolution_token: encryptToken('evo_token_secret_1'),
+        created_at: new Date(Date.now() - 5 * 86400000).toISOString(),
+        updated_at: new Date().toISOString(),
+        profile_name: 'Bali Support Desk',
+      },
+    ],
+    messages: [
+      {
+        id: 'msg_01',
+        instance_id: 'inst_prod_01',
+        instance_name: 'tenant_demo1_support',
+        direction: 'in',
+        to_number: '+62 812-3456-7890',
+        from_number: '+1 (415) 555-0199',
+        body: 'Hello! What are your tour prices for Mount Batur?',
+        status: 'read',
+        created_at: new Date(Date.now() - 40 * 60000).toISOString(),
+      },
+      {
+        id: 'msg_02',
+        instance_id: 'inst_prod_01',
+        instance_name: 'tenant_demo1_support',
+        direction: 'out',
+        to_number: '+1 (415) 555-0199',
+        from_number: '+62 812-3456-7890',
+        body: 'Hi there! Our Mount Batur Sunrise Trek is $55/person, including breakfast and hotel transfer. Reply BOOK to reserve!',
+        status: 'delivered',
+        created_at: new Date(Date.now() - 39 * 60000).toISOString(),
+      },
+    ],
+    automations: [
+      {
+        id: 'auto_01',
+        user_id: 'tenant-demo-user-1',
+        instance_id: 'inst_prod_01',
+        name: 'Pricing Inquiries Auto-Reply',
+        trigger_type: 'keyword',
+        trigger_config: { keyword: 'price', match_type: 'contains' },
+        action_config: {
+          reply_text:
+            'Thanks for asking! Our packages start at $45. Check our catalog at https://balitours.com/pricing or reply with your dates!',
+        },
+        enabled: true,
+        created_at: new Date(Date.now() - 5 * 86400000).toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      {
+        id: 'auto_02',
+        user_id: 'tenant-demo-user-1',
+        instance_id: 'inst_prod_01',
+        name: 'Greeting / Welcome Bot',
+        trigger_type: 'keyword',
+        trigger_config: { keyword: 'hello', match_type: 'contains' },
+        action_config: {
+          reply_text:
+            'Hello and welcome to Bali Adventours! How can we assist with your tropical getaway today?',
+        },
+        enabled: true,
+        created_at: new Date(Date.now() - 4 * 86400000).toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ],
+  },
+  'tenant-demo-user-2': {
+    profile: {
+      id: 'tenant-demo-user-2',
+      email: 'sarah@globalboutique.io',
+      role: 'tenant',
+      plan: 'starter',
+      company_name: 'Global Boutique',
+      status: 'active',
+      created_at: new Date(Date.now() - 14 * 86400000).toISOString(),
+    },
+    subscription: {
+      id: 'sub_demo_2',
+      user_id: 'tenant-demo-user-2',
+      plan: 'starter',
+      status: 'active',
+      instance_limit: 1,
+      message_limit: 1000,
+      period_start: new Date().toISOString(),
+      period_end: new Date(Date.now() + 30 * 86400000).toISOString(),
+    },
+    instances: [
+      {
+        id: 'inst_demo_02',
+        user_id: 'tenant-demo-user-2',
+        instance_name: 'tenant_demo2_store',
+        status: 'connected',
+        phone_number: '+1 (555) 234-5678',
+        connected_at: new Date(Date.now() - 3 * 86400000).toISOString(),
+        evolution_token: encryptToken('evo_token_secret_2'),
+        created_at: new Date(Date.now() - 3 * 86400000).toISOString(),
+        updated_at: new Date().toISOString(),
+        profile_name: 'Boutique Store Line',
+      },
+    ],
+    messages: [
+      {
+        id: 'msg_03',
+        instance_id: 'inst_demo_02',
+        instance_name: 'tenant_demo2_store',
+        direction: 'in',
+        to_number: '+1 (555) 234-5678',
+        from_number: '+1 (555) 987-6543',
+        body: 'Do you offer international shipping to Canada?',
+        status: 'read',
+        created_at: new Date(Date.now() - 120 * 60000).toISOString(),
+      },
+    ],
+    automations: [],
+  },
+  'tenant-demo-user-3': {
+    profile: {
+      id: 'tenant-demo-user-3',
+      email: 'marcus@apexrealty.com',
+      role: 'tenant',
+      plan: 'agency',
+      company_name: 'Apex Real Estate Holdings',
+      status: 'active',
+      created_at: new Date(Date.now() - 45 * 86400000).toISOString(),
+    },
+    subscription: {
+      id: 'sub_demo_3',
+      user_id: 'tenant-demo-user-3',
+      plan: 'agency',
+      status: 'active',
+      instance_limit: 10,
+      message_limit: 25000,
+      period_start: new Date(Date.now() - 20 * 86400000).toISOString(),
+      period_end: new Date(Date.now() + 10 * 86400000).toISOString(),
+    },
+    instances: [
+      {
+        id: 'inst_demo_03',
+        user_id: 'tenant-demo-user-3',
+        instance_name: 'tenant_demo3_villa_sales',
+        status: 'connected',
+        phone_number: '+62 821-9988-7766',
+        connected_at: new Date(Date.now() - 10 * 86400000).toISOString(),
+        evolution_token: encryptToken('evo_token_secret_3'),
+        created_at: new Date(Date.now() - 10 * 86400000).toISOString(),
+        updated_at: new Date().toISOString(),
+        profile_name: 'Luxury Villas Desk',
+      },
+      {
+        id: 'inst_demo_04',
+        user_id: 'tenant-demo-user-3',
+        instance_name: 'tenant_demo3_rentals',
+        status: 'connected',
+        phone_number: '+62 822-4455-6677',
+        connected_at: new Date(Date.now() - 8 * 86400000).toISOString(),
+        evolution_token: encryptToken('evo_token_secret_4'),
+        created_at: new Date(Date.now() - 8 * 86400000).toISOString(),
+        updated_at: new Date().toISOString(),
+        profile_name: 'Long-term Rentals Desk',
+      },
+    ],
+    messages: [
+      {
+        id: 'msg_04',
+        instance_id: 'inst_demo_03',
+        instance_name: 'tenant_demo3_villa_sales',
+        direction: 'out',
+        to_number: '+61 400 123 456',
+        body: 'Here is the brochure for the Canggu Cliffside Villa: https://apexrealty.com/canggu-cliff',
+        status: 'delivered',
+        created_at: new Date(Date.now() - 180 * 60000).toISOString(),
+      },
+    ],
+    automations: [
+      {
+        id: 'auto_03',
+        user_id: 'tenant-demo-user-3',
+        instance_id: 'inst_demo_03',
+        name: 'Villa Catalog Bot',
+        trigger_type: 'keyword',
+        trigger_config: { keyword: 'villa', match_type: 'contains' },
+        action_config: {
+          reply_text: 'Thank you for your interest in our villas! An investment agent will connect within 15 minutes.',
+        },
+        enabled: true,
+        created_at: new Date(Date.now() - 10 * 86400000).toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ],
+  },
+  'tenant-demo-user-4': {
+    profile: {
+      id: 'tenant-demo-user-4',
+      email: 'dian@jakartalogistics.co.id',
+      role: 'tenant',
+      plan: 'pro',
+      company_name: 'Jakarta Express Logistics',
+      status: 'active',
+      created_at: new Date(Date.now() - 60 * 86400000).toISOString(),
+    },
+    subscription: {
+      id: 'sub_demo_4',
+      user_id: 'tenant-demo-user-4',
+      plan: 'pro',
+      status: 'active',
+      instance_limit: 3,
+      message_limit: 5000,
+      period_start: new Date(Date.now() - 5 * 86400000).toISOString(),
+      period_end: new Date(Date.now() + 25 * 86400000).toISOString(),
+    },
+    instances: [
+      {
+        id: 'inst_demo_05',
+        user_id: 'tenant-demo-user-4',
+        instance_name: 'tenant_demo4_fleet',
+        status: 'connecting',
+        phone_number: null,
+        connected_at: null,
+        evolution_token: encryptToken('evo_token_secret_5'),
+        created_at: new Date(Date.now() - 1 * 86400000).toISOString(),
+        updated_at: new Date().toISOString(),
+        profile_name: 'Dispatch Center #2',
+      },
+    ],
+    messages: [],
+    automations: [],
+  },
+};
+
+// Pre-seed default test tokens for production simulation
+const DEFAULT_DEMO_TENANT_TOKEN = 'wautomation_session_tenant_alex';
+const DEFAULT_ROOT_ADMIN_TOKEN = 'wautomation_session_admin_root';
+const LEGACY_DEMO_TENANT_TOKEN = 'wapilot_session_tenant_alex';
+const LEGACY_ROOT_ADMIN_TOKEN = 'wapilot_session_admin_root';
+
+[DEFAULT_DEMO_TENANT_TOKEN, LEGACY_DEMO_TENANT_TOKEN].forEach((tok) => {
+  activeSessions.set(tok, {
+    token: tok,
+    userId: 'tenant-demo-user-1',
+    email: 'alex@balitours.com',
+    role: 'tenant',
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 60 * 86400000,
+  });
+});
+
+[DEFAULT_ROOT_ADMIN_TOKEN, LEGACY_ROOT_ADMIN_TOKEN].forEach((tok) => {
+  activeSessions.set(tok, {
+    token: tok,
+    userId: 'superadmin-root',
+    email: 'baliadventours@gmail.com',
+    role: 'superadmin',
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 60 * 86400000,
+  });
+});
+
+function getAuthUser(req: express.Request): { profile: UserProfile; subscription: Subscription; tenantState: TenantState } | null {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ')
+    ? authHeader.substring(7).trim()
+    : (req.headers['x-auth-token'] as string);
+
+  if (!token) return null;
+  const session = activeSessions.get(token);
+  if (!session || session.expiresAt < Date.now()) {
+    return null;
+  }
+
+  // Superadmin impersonation support
+  const impersonateId = req.headers['x-impersonate-tenant'] as string;
+  if (session.role === 'superadmin' && impersonateId && mockTenants[impersonateId]) {
+    const target = mockTenants[impersonateId];
+    return { profile: target.profile, subscription: target.subscription, tenantState: target };
+  }
+
+  const tenant = mockTenants[session.userId];
+  if (tenant) {
+    return { profile: tenant.profile, subscription: tenant.subscription, tenantState: tenant };
+  }
+  return null;
+}
+
+function getActiveTenant(req?: express.Request): TenantState {
+  if (req) {
+    const auth = getAuthUser(req);
+    if (auth) return auth.tenantState;
+  }
+  if (!mockTenants[activeTenantId]) {
+    activeTenantId = 'tenant-demo-user-1';
+  }
+  return mockTenants[activeTenantId];
+}
+
+// ---------------------------------------------------------------------------
+// REST API ROUTES
+// ---------------------------------------------------------------------------
+
+// 1. System Health & Evolution API VPS Connectivity
+app.get('/api/health', async (req, res) => {
+  const isEvoConfigured = evolutionApi.isConfigured();
+  let isEvoConnected = false;
+  let evoMessage = 'Evolution API not configured. Running in high-fidelity preview mode.';
+  let evoVersion: string | undefined;
+
+  if (isEvoConfigured) {
+    const health = await evolutionApi.checkHealth();
+    isEvoConnected = health.ok;
+    evoMessage = health.message;
+    evoVersion = health.version;
+  }
+
+  const appUrl = process.env.APP_URL || `http://localhost:${PORT}`;
+
+  res.json({
+    status: isEvoConnected ? 'healthy' : 'configured',
+    evolutionApiConfigured: isEvoConfigured,
+    evolutionApiConnected: isEvoConnected,
+    evolutionApiUrl: evolutionApi.getBaseUrl() || 'http://your-vps-ip:8080',
+    evolutionVersion: evoVersion,
+    supabaseConfigured: isServerSupabaseConfigured,
+    webhookUrl: `${appUrl.replace(/\/$/, '')}/api/webhook/evolution`,
+    message: evoMessage,
+    activeTenantId,
+  });
+});
+
+// 2. Auth & Current Tenant Profile
+app.get('/api/auth/me', async (req, res) => {
+  const auth = getAuthUser(req);
+  if (!auth) {
+    return res.status(401).json({
+      authenticated: false,
+      user: null,
+      message: 'Unauthorized. Sign in required.',
+    });
+  }
+
+  const tenant = auth.tenantState;
+  const instancesCount = tenant.instances.length;
+  const messagesCount = tenant.messages.filter((m) => m.direction === 'out').length;
+
+  res.json({
+    authenticated: true,
+    user: auth.profile,
+    subscription: {
+      ...auth.subscription,
+      current_usage: {
+        instances_count: instancesCount,
+        messages_sent_this_period: messagesCount,
+      },
+    },
+    availableTenants: auth.profile.role === 'superadmin'
+      ? Object.keys(mockTenants).map((id) => ({
+          id,
+          email: mockTenants[id].profile.email,
+          company: mockTenants[id].profile.company_name,
+          plan: mockTenants[id].profile.plan,
+        }))
+      : [],
+  });
+});
+
+// Switch active tenant in UI (Superadmin only)
+app.post('/api/auth/switch-tenant', (req, res) => {
+  const auth = getAuthUser(req);
+  if (!auth || auth.profile.role !== 'superadmin') {
+    return res.status(403).json({ error: 'Superadmin privileges required to switch tenant workspaces.' });
+  }
+
+  const { tenantId } = req.body;
+  if (mockTenants[tenantId]) {
+    activeTenantId = tenantId;
+    res.json({ success: true, activeTenantId });
+  } else {
+    res.status(404).json({ error: 'Tenant not found' });
+  }
+});
+
+// 3. WhatsApp Instances: List
+app.get('/api/instances', async (req, res) => {
+  const tenant = getActiveTenant();
+
+  // If connected to Evolution API, refresh status for each instance
+  if (evolutionApi.isConfigured()) {
+    for (const inst of tenant.instances) {
+      const state = await evolutionApi.getConnectionState(inst.instance_name);
+      if (state.state === 'open' && inst.status !== 'connected') {
+        inst.status = 'connected';
+        if (state.phone) inst.phone_number = state.phone;
+        inst.connected_at = inst.connected_at || new Date().toISOString();
+      } else if (state.state === 'close' && inst.status === 'connected') {
+        inst.status = 'disconnected';
+      }
+    }
+  }
+
+  res.json({ instances: tenant.instances });
+});
+
+// 4. WhatsApp Instances: Create new instance & generate QR
+app.post('/api/instances', async (req, res) => {
+  try {
+    const tenant = getActiveTenant();
+    const limit = tenant.subscription.instance_limit;
+
+    if (tenant.instances.length >= limit) {
+      return res.status(403).json({
+        error: `Instance limit reached (${tenant.instances.length}/${limit}). Upgrade to Pro or Agency to connect more WhatsApp numbers.`,
+      });
+    }
+
+    const { friendly_name } = req.body;
+    const shortUserId = tenant.profile.id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8);
+    const instanceIndex = tenant.instances.length + 1;
+    const instanceName = `tenant_${shortUserId}_${instanceIndex}_${Date.now().toString().slice(-4)}`;
+    const instanceToken = crypto.randomBytes(24).toString('hex');
+    const encryptedToken = encryptToken(instanceToken);
+
+    const appUrl = process.env.APP_URL || `http://localhost:${PORT}`;
+    const webhookUrl = `${appUrl.replace(/\/$/, '')}/api/webhook/evolution`;
+
+    // 1. Call Evolution API to create instance
+    const evoResult = await evolutionApi.createInstance({
+      instanceName,
+      token: instanceToken,
+      webhookUrl,
+    });
+
+    if (!evoResult.success) {
+      return res.status(502).json({
+        error: evoResult.error || 'Failed to initialize instance in Evolution API',
+      });
+    }
+
+    // 2. Fetch QR code
+    const qrResult = await evolutionApi.getConnectQr(instanceName);
+
+    // 3. Save instance in tenant store
+    const newInstance: WhatsAppInstance = {
+      id: `inst_${Date.now()}`,
+      user_id: tenant.profile.id,
+      instance_name: instanceName,
+      status: 'connecting',
+      phone_number: null,
+      connected_at: null,
+      evolution_token: encryptedToken,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      profile_name: friendly_name || `WhatsApp Line ${instanceIndex}`,
+    };
+
+    tenant.instances.unshift(newInstance);
+
+    res.json({
+      instance: newInstance,
+      qr: qrResult.qr,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5. WhatsApp Instances: Get fresh QR code or connection state
+app.get('/api/instances/:id/connect', async (req, res) => {
+  try {
+    const tenant = getActiveTenant();
+    const instance = tenant.instances.find((i) => i.id === req.params.id);
+
+    if (!instance) {
+      return res.status(404).json({ error: 'Instance not found' });
+    }
+
+    const qrResult = await evolutionApi.getConnectQr(instance.instance_name);
+    const stateResult = await evolutionApi.getConnectionState(instance.instance_name);
+
+    if (stateResult.state === 'open' && instance.status !== 'connected') {
+      instance.status = 'connected';
+      instance.phone_number = stateResult.phone || instance.phone_number;
+      instance.connected_at = new Date().toISOString();
+    }
+
+    res.json({
+      qr: qrResult.qr,
+      state: stateResult.state,
+      phone: stateResult.phone,
+      status: instance.status,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 6. Simulate scan (for interactive testing when physical QR isn't paired to VPS yet)
+app.post('/api/instances/:id/simulate-scan', (req, res) => {
+  const tenant = getActiveTenant();
+  const instance = tenant.instances.find((i) => i.id === req.params.id);
+
+  if (!instance) {
+    return res.status(404).json({ error: 'Instance not found' });
+  }
+
+  const { phone_number } = req.body;
+  instance.status = 'connected';
+  instance.phone_number = phone_number || `+62 812-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}`;
+  instance.connected_at = new Date().toISOString();
+
+  res.json({ success: true, instance });
+});
+
+// 7. Disconnect / Reconnect / Delete Instance
+app.post('/api/instances/:id/disconnect', async (req, res) => {
+  const tenant = getActiveTenant();
+  const instance = tenant.instances.find((i) => i.id === req.params.id);
+
+  if (!instance) {
+    return res.status(404).json({ error: 'Instance not found' });
+  }
+
+  await evolutionApi.logoutInstance(instance.instance_name);
+  instance.status = 'disconnected';
+  res.json({ success: true, instance });
+});
+
+app.delete('/api/instances/:id', async (req, res) => {
+  const tenant = getActiveTenant();
+  const index = tenant.instances.findIndex((i) => i.id === req.params.id);
+
+  if (index === -1) {
+    return res.status(404).json({ error: 'Instance not found' });
+  }
+
+  const instance = tenant.instances[index];
+  await evolutionApi.deleteInstance(instance.instance_name);
+
+  // Remove instance and cascade messages/automations
+  tenant.instances.splice(index, 1);
+  tenant.messages = tenant.messages.filter((m) => m.instance_id !== instance.id);
+  tenant.automations = tenant.automations.filter((a) => a.instance_id !== instance.id);
+
+  res.json({ success: true, message: 'Instance deleted' });
+});
+
+// 8. Send Test Message (with rate limiting & usage enforcement)
+app.post('/api/messages/send', async (req, res) => {
+  try {
+    const tenant = getActiveTenant();
+    const { instance_id, to_number, text } = req.body;
+
+    if (!instance_id || !to_number || !text) {
+      return res.status(400).json({ error: 'Missing instance_id, to_number, or text' });
+    }
+
+    // Rate Limit (30/min per tenant)
+    const rate = checkRateLimit(`tenant:${tenant.profile.id}`, 30, 60 * 1000);
+    if (!rate.allowed) {
+      return res.status(429).json({
+        error: `Rate limit hit. Please wait ${Math.ceil(rate.resetMs / 1000)}s before dispatching more messages.`,
+      });
+    }
+
+    // Check message quota
+    const sentCount = tenant.messages.filter((m) => m.direction === 'out').length;
+    if (sentCount >= tenant.subscription.message_limit) {
+      return res.status(403).json({
+        error: `Monthly message quota reached (${sentCount}/${tenant.subscription.message_limit}). Please upgrade your plan.`,
+      });
+    }
+
+    // Verify instance ownership
+    const instance = tenant.instances.find((i) => i.id === instance_id);
+    if (!instance) {
+      return res.status(403).json({ error: 'Unauthorized instance' });
+    }
+
+    if (instance.status !== 'connected') {
+      return res.status(400).json({
+        error: `Instance is currently "${instance.status}". Please scan QR code to connect first.`,
+      });
+    }
+
+    const decryptedToken = instance.evolution_token ? decryptToken(instance.evolution_token) : undefined;
+
+    // Send via Evolution API
+    const sendResult = await evolutionApi.sendTextMessage(
+      instance.instance_name,
+      to_number,
+      text,
+      decryptedToken
+    );
+
+    const logEntry: MessageLog = {
+      id: `msg_${Date.now()}`,
+      instance_id: instance.id,
+      instance_name: instance.instance_name,
+      direction: 'out',
+      to_number,
+      from_number: instance.phone_number || undefined,
+      body: text,
+      status: sendResult.success ? 'sent' : 'failed',
+      created_at: new Date().toISOString(),
+    };
+
+    tenant.messages.unshift(logEntry);
+
+    if (!sendResult.success) {
+      return res.status(502).json({
+        error: sendResult.error || 'Failed to dispatch via Evolution API',
+        log: logEntry,
+      });
+    }
+
+    res.json({
+      success: true,
+      log: logEntry,
+      remainingRate: rate.remaining,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9. Message Logs
+app.get('/api/messages/logs', (req, res) => {
+  const tenant = getActiveTenant();
+  const { instance_id } = req.query;
+
+  let logs = tenant.messages;
+  if (instance_id) {
+    logs = logs.filter((m) => m.instance_id === instance_id);
+  }
+
+  res.json({ logs });
+});
+
+// 10. Automations: List, Create, Toggle, Delete
+app.get('/api/automations', (req, res) => {
+  const tenant = getActiveTenant();
+  res.json({ automations: tenant.automations });
+});
+
+app.post('/api/automations', (req, res) => {
+  const tenant = getActiveTenant();
+  const { instance_id, name, trigger_type, trigger_config, action_config } = req.body;
+
+  if (!instance_id || !name || !trigger_type) {
+    return res.status(400).json({ error: 'Missing required automation parameters' });
+  }
+
+  const newAuto: Automation = {
+    id: `auto_${Date.now()}`,
+    user_id: tenant.profile.id,
+    instance_id,
+    name,
+    trigger_type: trigger_type || 'keyword',
+    trigger_config: trigger_config || { keyword: '', match_type: 'contains' },
+    action_config: action_config || { reply_text: '' },
+    enabled: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  tenant.automations.unshift(newAuto);
+  res.json({ success: true, automation: newAuto });
+});
+
+app.patch('/api/automations/:id/toggle', (req, res) => {
+  const tenant = getActiveTenant();
+  const auto = tenant.automations.find((a) => a.id === req.params.id);
+
+  if (!auto) {
+    return res.status(404).json({ error: 'Automation not found' });
+  }
+
+  auto.enabled = !auto.enabled;
+  auto.updated_at = new Date().toISOString();
+  res.json({ success: true, automation: auto });
+});
+
+app.delete('/api/automations/:id', (req, res) => {
+  const tenant = getActiveTenant();
+  const index = tenant.automations.findIndex((a) => a.id === req.params.id);
+
+  if (index === -1) {
+    return res.status(404).json({ error: 'Automation not found' });
+  }
+
+  tenant.automations.splice(index, 1);
+  res.json({ success: true });
+});
+
+// 11. Webhook Endpoint: Registered in Evolution API
+app.post('/api/webhook/evolution', async (req, res) => {
+  try {
+    const payload = req.body || {};
+    const event = payload.event || payload.type;
+    const instanceName = payload.instance || payload.instanceName;
+
+    console.log(`[Evolution Webhook] Event: ${event}, Instance: ${instanceName}`);
+
+    // Locate tenant instance across our tenants
+    let targetTenant: TenantState | null = null;
+    let targetInstance: WhatsAppInstance | null = null;
+
+    for (const t of Object.values(mockTenants)) {
+      const inst = t.instances.find((i) => i.instance_name === instanceName);
+      if (inst) {
+        targetTenant = t;
+        targetInstance = inst;
+        break;
+      }
+    }
+
+    if (!targetInstance || !targetTenant) {
+      return res.status(200).json({ message: 'Instance not found or unmanaged' });
+    }
+
+    // 1. Connection Update
+    if (event === 'CONNECTION_UPDATE' || event === 'connection.update') {
+      const state = payload.data?.state || payload.state;
+      const ownerJid = payload.data?.owner || payload.owner;
+      const phone = ownerJid ? ownerJid.split('@')[0] : targetInstance.phone_number;
+
+      if (state === 'open') {
+        targetInstance.status = 'connected';
+        targetInstance.phone_number = phone;
+        targetInstance.connected_at = new Date().toISOString();
+      } else if (state === 'close') {
+        targetInstance.status = 'disconnected';
+      }
+
+      return res.json({ received: true });
+    }
+
+    // 2. Incoming Messages & Keyword Automation
+    if (event === 'MESSAGES_UPSERT' || event === 'messages.upsert') {
+      const data = payload.data;
+      const messageObj = data?.message || data?.[0]?.message;
+      const key = data?.key || data?.[0]?.key;
+
+      if (key?.fromMe) {
+        return res.json({ received: true, ignored: 'from_me' });
+      }
+
+      const remoteJid = key?.remoteJid || '';
+      const fromNumber = remoteJid.replace(/@s\.whatsapp\.net|@g\.us/, '');
+      const text =
+        messageObj?.conversation ||
+        messageObj?.extendedTextMessage?.text ||
+        messageObj?.imageMessage?.caption ||
+        '';
+
+      if (!text) {
+        return res.json({ received: true, note: 'non_text' });
+      }
+
+      // Log inbound message
+      const inLog: MessageLog = {
+        id: `msg_${Date.now()}`,
+        instance_id: targetInstance.id,
+        instance_name: targetInstance.instance_name,
+        direction: 'in',
+        to_number: targetInstance.phone_number || 'me',
+        from_number: fromNumber,
+        body: text,
+        status: 'delivered',
+        created_at: new Date().toISOString(),
+      };
+      targetTenant.messages.unshift(inLog);
+
+      // Check automations
+      const activeAutomations = targetTenant.automations.filter(
+        (a) => a.instance_id === targetInstance!.id && a.enabled && a.trigger_type === 'keyword'
+      );
+
+      const normalizedMsg = text.trim().toLowerCase();
+      for (const auto of activeAutomations) {
+        const config = auto.trigger_config as any;
+        const kw = (config?.keyword || '').trim().toLowerCase();
+        const matchType = config?.match_type || 'contains';
+
+        let matches = false;
+        if (matchType === 'exact') matches = normalizedMsg === kw;
+        else if (matchType === 'starts_with') matches = normalizedMsg.startsWith(kw);
+        else matches = normalizedMsg.includes(kw);
+
+        if (matches && auto.action_config?.reply_text) {
+          const replyText = auto.action_config.reply_text;
+          const decryptedToken = targetInstance.evolution_token
+            ? decryptToken(targetInstance.evolution_token)
+            : undefined;
+
+          // Dispatch reply
+          const sendRes = await evolutionApi.sendTextMessage(
+            targetInstance.instance_name,
+            fromNumber,
+            replyText,
+            decryptedToken
+          );
+
+          // Log outbound reply
+          const outLog: MessageLog = {
+            id: `msg_${Date.now() + 1}`,
+            instance_id: targetInstance.id,
+            instance_name: targetInstance.instance_name,
+            direction: 'out',
+            to_number: fromNumber,
+            from_number: targetInstance.phone_number || undefined,
+            body: replyText,
+            status: sendRes.success ? 'sent' : 'failed',
+            created_at: new Date().toISOString(),
+          };
+          targetTenant.messages.unshift(outLog);
+
+          break; // Fire single matching automation
+        }
+      }
+
+      return res.json({ received: true, processed: true });
+    }
+
+    res.json({ received: true });
+  } catch (err: any) {
+    console.error('[Webhook error]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 12. Simulate Incoming Message (Test Automation Loop in Preview!)
+app.post('/api/instances/:id/simulate-incoming', async (req, res) => {
+  const tenant = getActiveTenant();
+  const instance = tenant.instances.find((i) => i.id === req.params.id);
+
+  if (!instance) {
+    return res.status(404).json({ error: 'Instance not found' });
+  }
+
+  const { from_number = '+1 (555) 987-6543', text = 'Can you give me price info?' } = req.body;
+
+  // Synthesize webhook payload
+  const simulatedPayload = {
+    event: 'MESSAGES_UPSERT',
+    instance: instance.instance_name,
+    data: {
+      key: {
+        remoteJid: `${from_number.replace(/\D/g, '')}@s.whatsapp.net`,
+        fromMe: false,
+      },
+      message: {
+        conversation: text,
+      },
+    },
+  };
+
+  // Dispatch internally through webhook handler
+  const inLog: MessageLog = {
+    id: `msg_${Date.now()}`,
+    instance_id: instance.id,
+    instance_name: instance.instance_name,
+    direction: 'in',
+    to_number: instance.phone_number || 'me',
+    from_number,
+    body: text,
+    status: 'delivered',
+    created_at: new Date().toISOString(),
+  };
+  tenant.messages.unshift(inLog);
+
+  // Evaluate automations
+  const activeAutomations = tenant.automations.filter(
+    (a) => a.instance_id === instance.id && a.enabled && a.trigger_type === 'keyword'
+  );
+
+  let triggeredAutomation: Automation | null = null;
+  let replyText = '';
+  const normalizedMsg = text.trim().toLowerCase();
+
+  for (const auto of activeAutomations) {
+    const config = auto.trigger_config as any;
+    const kw = (config?.keyword || '').trim().toLowerCase();
+    const matchType = config?.match_type || 'contains';
+
+    let matches = false;
+    if (matchType === 'exact') matches = normalizedMsg === kw;
+    else if (matchType === 'starts_with') matches = normalizedMsg.startsWith(kw);
+    else matches = normalizedMsg.includes(kw);
+
+    if (matches && auto.action_config?.reply_text) {
+      triggeredAutomation = auto;
+      replyText = auto.action_config.reply_text;
+
+      const outLog: MessageLog = {
+        id: `msg_${Date.now() + 1}`,
+        instance_id: instance.id,
+        instance_name: instance.instance_name,
+        direction: 'out',
+        to_number: fromNumberClean(from_number),
+        from_number: instance.phone_number || undefined,
+        body: replyText,
+        status: 'sent',
+        created_at: new Date(Date.now() + 800).toISOString(),
+      };
+      tenant.messages.unshift(outLog);
+      break;
+    }
+  }
+
+  res.json({
+    success: true,
+    inbound: inLog,
+    triggeredAutomation: triggeredAutomation ? triggeredAutomation.name : null,
+    autoReplied: Boolean(replyText),
+    replyText,
+  });
+});
+
+function fromNumberClean(num: string) {
+  return num;
+}
+
+// 13. Plan Upgrade (Stripe simulation/stub)
+app.post('/api/billing/upgrade', (req, res) => {
+  const tenant = getActiveTenant();
+  const { plan } = req.body;
+
+  const pkg = subscriptionPackages.find((p) => p.plan === plan);
+  if (!pkg && !['starter', 'pro', 'agency', 'enterprise'].includes(plan)) {
+    return res.status(400).json({ error: 'Invalid plan' });
+  }
+
+  const instLimit = pkg ? pkg.instance_limit : plan === 'starter' ? 1 : plan === 'pro' ? 3 : 10;
+  const msgLimit = pkg ? pkg.message_limit : plan === 'starter' ? 1000 : plan === 'pro' ? 5000 : 25000;
+
+  tenant.profile.plan = plan;
+  tenant.subscription.plan = plan;
+  tenant.subscription.instance_limit = instLimit;
+  tenant.subscription.message_limit = msgLimit;
+
+  res.json({
+    success: true,
+    profile: tenant.profile,
+    subscription: tenant.subscription,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 14. Registration, Login & Logout (Production Session Management)
+// ---------------------------------------------------------------------------
+app.post('/api/auth/register', (req, res) => {
+  const { email, password, company_name, plan = 'starter' } = req.body;
+
+  if (!email || !email.includes('@')) {
+    return res.status(400).json({ error: 'Valid email is required.' });
+  }
+
+  const lowerEmail = email.toLowerCase().trim();
+
+  // Check if tenant already exists
+  const existingKey = Object.keys(mockTenants).find((k) => mockTenants[k].profile.email.toLowerCase() === lowerEmail);
+  if (existingKey) {
+    const tenant = mockTenants[existingKey];
+    const token = `wautomation_session_${crypto.randomBytes(20).toString('hex')}`;
+    activeSessions.set(token, {
+      token,
+      userId: tenant.profile.id,
+      email: tenant.profile.email,
+      role: tenant.profile.role,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 30 * 86400000,
+    });
+
+    return res.json({
+      success: true,
+      token,
+      message: 'Logged in to existing account',
+      user: tenant.profile,
+      subscription: tenant.subscription,
+    });
+  }
+
+  // Create new tenant
+  const newId = `tenant_${Date.now()}`;
+  const selectedPkg = subscriptionPackages.find((p) => p.plan === plan) || subscriptionPackages[0];
+
+  const newTenant: TenantState = {
+    profile: {
+      id: newId,
+      email: lowerEmail,
+      role: 'tenant',
+      company_name: company_name || email.split('@')[0],
+      plan: selectedPkg.plan,
+      status: 'active',
+      created_at: new Date().toISOString(),
+    },
+    subscription: {
+      id: `sub_${newId}`,
+      user_id: newId,
+      plan: selectedPkg.plan,
+      status: 'active',
+      instance_limit: selectedPkg.instance_limit,
+      message_limit: selectedPkg.message_limit,
+      period_start: new Date().toISOString(),
+      period_end: new Date(Date.now() + 30 * 86400000).toISOString(),
+    },
+    instances: [],
+    messages: [],
+    automations: [],
+  };
+
+  mockTenants[newId] = newTenant;
+  if (password) {
+    userCredentials[lowerEmail] = { password, role: 'tenant', tenantId: newId };
+  }
+
+  const token = `wautomation_session_${crypto.randomBytes(20).toString('hex')}`;
+  activeSessions.set(token, {
+    token,
+    userId: newId,
+    email: lowerEmail,
+    role: 'tenant',
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 30 * 86400000,
+  });
+
+  res.status(201).json({
+    success: true,
+    token,
+    user: newTenant.profile,
+    subscription: newTenant.subscription,
+  });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body;
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required' });
+  }
+
+  const lowerEmail = email.toLowerCase().trim();
+  const existingKey = Object.keys(mockTenants).find((k) => mockTenants[k].profile.email.toLowerCase() === lowerEmail);
+
+  if (existingKey) {
+    const tenant = mockTenants[existingKey];
+
+    // Validate password if credentials exist
+    const cred = userCredentials[lowerEmail];
+    if (cred && password && cred.password !== password) {
+      return res.status(401).json({ error: 'Invalid password. Please check your credentials.' });
+    }
+
+    const token = `wautomation_session_${crypto.randomBytes(20).toString('hex')}`;
+    activeSessions.set(token, {
+      token,
+      userId: tenant.profile.id,
+      email: tenant.profile.email,
+      role: tenant.profile.role,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 30 * 86400000,
+    });
+
+    return res.json({
+      success: true,
+      token,
+      user: tenant.profile,
+      subscription: tenant.subscription,
+    });
+  }
+
+  return res.status(404).json({
+    error: 'No account found with this email. Please click "Create an Account" to register.',
+  });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.substring(7).trim() : (req.headers['x-auth-token'] as string);
+  if (token) {
+    activeSessions.delete(token);
+  }
+  res.json({ success: true, message: 'Logged out successfully' });
+});
+
+function requireSuperadmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const auth = getAuthUser(req);
+  if (!auth) {
+    return res.status(401).json({ error: 'Authentication required. Please sign in as Superadmin.' });
+  }
+  if (auth.profile.role !== 'superadmin') {
+    return res.status(403).json({ error: 'Access denied: Master Superadmin privileges required.' });
+  }
+  next();
+}
+
+// ---------------------------------------------------------------------------
+// 15. Master Admin / Superadmin Routes (Protected by Superadmin Role)
+// ---------------------------------------------------------------------------
+app.get('/api/admin/overview', requireSuperadmin, (req, res) => {
+  const tenantKeys = Object.keys(mockTenants);
+  const tenantsList = tenantKeys.map((key) => {
+    const t = mockTenants[key];
+    return {
+      id: t.profile.id,
+      email: t.profile.email,
+      company_name: t.profile.company_name,
+      plan: t.profile.plan,
+      status: t.profile.status || 'active',
+      created_at: t.profile.created_at,
+      instance_limit: t.subscription.instance_limit,
+      message_limit: t.subscription.message_limit,
+      connected_instances_count: t.instances.filter((i) => i.status === 'connected').length,
+      total_instances_count: t.instances.length,
+      total_messages_count: t.messages.length,
+      subscription_status: t.subscription.status,
+    };
+  });
+
+  // Calculate platform-wide totals
+  const allInstances: Array<WhatsAppInstance & { tenantEmail: string; tenantCompany?: string }> = [];
+  let totalMessagesSent = 0;
+  let activeTenantsCount = 0;
+  let connectedInstancesCount = 0;
+
+  for (const key of tenantKeys) {
+    const t = mockTenants[key];
+    if (t.profile.status !== 'suspended') activeTenantsCount++;
+    totalMessagesSent += t.messages.length;
+
+    for (const inst of t.instances) {
+      if (inst.status === 'connected') connectedInstancesCount++;
+      allInstances.push({
+        ...inst,
+        tenantEmail: t.profile.email,
+        tenantCompany: t.profile.company_name,
+      });
+    }
+  }
+
+  // Monthly Recurring Revenue estimate based on active tiers
+  const tierPrices: Record<string, number> = {
+    starter: 29,
+    pro: 79,
+    agency: 199,
+    enterprise: 499,
+  };
+
+  const mrr = tenantKeys.reduce((acc, k) => {
+    const plan = mockTenants[k].profile.plan;
+    return acc + (tierPrices[plan] || 29);
+  }, 0);
+
+  // Add active subscriber count to each package
+  const packagesWithStats = subscriptionPackages.map((pkg) => {
+    const count = tenantKeys.filter((k) => mockTenants[k].profile.plan === pkg.plan).length;
+    return {
+      ...pkg,
+      activeSubscriberCount: count,
+    };
+  });
+
+  res.json({
+    stats: {
+      totalTenants: tenantKeys.length,
+      activeTenants: activeTenantsCount,
+      totalInstances: allInstances.length,
+      connectedInstances: connectedInstancesCount,
+      totalMessagesSent,
+      monthlyRecurringRevenue: mrr,
+    },
+    tenants: tenantsList,
+    packages: packagesWithStats,
+    instances: allInstances,
+  });
+});
+
+// Update a tenant's plan or quotas
+app.post('/api/admin/tenants/:id/plan', requireSuperadmin, (req, res) => {
+  const { id } = req.params;
+  const { plan, instance_limit, message_limit } = req.body;
+
+  const tenant = mockTenants[id];
+  if (!tenant) {
+    return res.status(404).json({ error: 'Tenant not found' });
+  }
+
+  if (plan) {
+    tenant.profile.plan = plan;
+    tenant.subscription.plan = plan;
+  }
+  if (typeof instance_limit === 'number') {
+    tenant.subscription.instance_limit = instance_limit;
+  }
+  if (typeof message_limit === 'number') {
+    tenant.subscription.message_limit = message_limit;
+  }
+
+  res.json({
+    success: true,
+    tenant: {
+      id: tenant.profile.id,
+      email: tenant.profile.email,
+      plan: tenant.profile.plan,
+      instance_limit: tenant.subscription.instance_limit,
+      message_limit: tenant.subscription.message_limit,
+    },
+  });
+});
+
+// Suspend or reinstate a tenant
+app.post('/api/admin/tenants/:id/status', requireSuperadmin, (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  const tenant = mockTenants[id];
+  if (!tenant) {
+    return res.status(404).json({ error: 'Tenant not found' });
+  }
+
+  tenant.profile.status = status === 'suspended' ? 'suspended' : 'active';
+  res.json({ success: true, status: tenant.profile.status });
+});
+
+// Create or update subscription packages
+app.post('/api/admin/packages', requireSuperadmin, (req, res) => {
+  const { id, plan, name, priceMonthly, instance_limit, message_limit, description, features } = req.body;
+
+  if (!plan || !name || typeof priceMonthly !== 'number') {
+    return res.status(400).json({ error: 'Plan name, price, and tier key are required.' });
+  }
+
+  const existingIdx = subscriptionPackages.findIndex((p) => p.id === id || p.plan === plan);
+  if (existingIdx >= 0) {
+    subscriptionPackages[existingIdx] = {
+      ...subscriptionPackages[existingIdx],
+      name,
+      priceMonthly,
+      instance_limit: instance_limit || subscriptionPackages[existingIdx].instance_limit,
+      message_limit: message_limit || subscriptionPackages[existingIdx].message_limit,
+      description: description || subscriptionPackages[existingIdx].description,
+      features: Array.isArray(features) ? features : subscriptionPackages[existingIdx].features,
+    };
+  } else {
+    subscriptionPackages.push({
+      id: id || `pkg_${Date.now()}`,
+      plan,
+      name,
+      priceMonthly,
+      instance_limit: instance_limit || 1,
+      message_limit: message_limit || 1000,
+      description: description || '',
+      features: Array.isArray(features) ? features : [],
+      isPopular: false,
+    });
+  }
+
+  res.json({ success: true, packages: subscriptionPackages });
+});
+
+// Delete a subscription package
+app.delete('/api/admin/packages/:id', requireSuperadmin, (req, res) => {
+  const { id } = req.params;
+  subscriptionPackages = subscriptionPackages.filter((p) => p.id !== id);
+  res.json({ success: true, packages: subscriptionPackages });
+});
+
+// Force restart an instance across the platform
+app.post('/api/admin/instances/:id/reboot', requireSuperadmin, (req, res) => {
+  const { id } = req.params;
+  for (const key of Object.keys(mockTenants)) {
+    const inst = mockTenants[key].instances.find((i) => i.id === id);
+    if (inst) {
+      inst.status = 'connected';
+      inst.updated_at = new Date().toISOString();
+      return res.json({ success: true, instance: inst });
+    }
+  }
+  res.status(404).json({ error: 'Instance not found' });
+});
+
+// Force delete an instance across the platform
+app.delete('/api/admin/instances/:id', requireSuperadmin, (req, res) => {
+  const { id } = req.params;
+  for (const key of Object.keys(mockTenants)) {
+    const idx = mockTenants[key].instances.findIndex((i) => i.id === id);
+    if (idx >= 0) {
+      mockTenants[key].instances.splice(idx, 1);
+      return res.json({ success: true, deleted: true });
+    }
+  }
+  res.status(404).json({ error: 'Instance not found' });
+});
+
+// ---------------------------------------------------------------------------
+// Vite Middleware / Static Server
+// ---------------------------------------------------------------------------
+async function startServer() {
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[Wautomation.io Server] Running on http://0.0.0.0:${PORT}`);
+  });
+}
+
+startServer();
