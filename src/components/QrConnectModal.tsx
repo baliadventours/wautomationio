@@ -61,9 +61,10 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
             width: 280,
             margin: 2,
             color: {
-              dark: '#0f172a',
+              dark: '#000000',
               light: '#ffffff',
             },
+            errorCorrectionLevel: 'M',
           });
           setGeneratedQrUrl(url);
         } catch (e) {
@@ -100,8 +101,10 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
           }, 1200);
         } else if (data.qr) {
           setQrData(data.qr);
-          if (data.qr.pairingCode && !pairingCode) {
-            setPairingCode(data.qr.pairingCode);
+          const rawCode = data.qr.pairingCode || "";
+          const isRealPairing = rawCode && rawCode.length <= 10 && !rawCode.includes("@") && !rawCode.includes("/") && !rawCode.includes("=");
+          if (isRealPairing && !pairingCode) {
+            setPairingCode(rawCode);
           }
         }
       } catch (err: any) {
@@ -132,16 +135,23 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
       });
 
       const data = await res.json();
-      if (res.ok && data.pairingCode) {
+      const isValidCode = (c: any) => Boolean(c && typeof c === 'string' && c.length <= 10 && !c.includes('/') && !c.includes('@') && !c.includes('='));
+      
+      if (res.ok && isValidCode(data.pairingCode)) {
         setPairingCode(data.pairingCode);
       } else {
-        // If Evolution API pairing code failed, try via /connect endpoint
+        // Try connect endpoint with number
         const fallbackRes = await fetch(`/api/instances/${instance.id}/connect?number=${cleaned}`);
         const fallbackData = await fallbackRes.json();
-        if (fallbackData?.qr?.pairingCode) {
-          setPairingCode(fallbackData.qr.pairingCode);
-        } else if (fallbackData?.error || data?.error) {
-          setErrorMessage(fallbackData?.error || data?.error || 'Could not generate pairing code. Make sure Evolution API is running.');
+        const candidate = fallbackData?.qr?.pairingCode;
+        if (isValidCode(candidate)) {
+          setPairingCode(candidate);
+        } else {
+          // If Evolution API returned a QR string instead of 8-character code
+          if (fallbackData?.qr) {
+            setQrData(fallbackData.qr);
+          }
+          setErrorMessage('Evolution API returned a QR scan token instead of a numeric pairing code. Please use the "Scan QR Code" tab above to link your phone.');
         }
       }
     } catch (err: any) {
@@ -378,12 +388,13 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
             /* =================== TAB 2: QR CODE SCAN =================== */
             <div className="text-center space-y-4">
               {/* QR Code Container */}
-              <div className="relative mx-auto w-64 h-64 bg-slate-50 border-2 border-dashed border-slate-200 rounded-2xl flex items-center justify-center p-3 shadow-inner">
+              <div className="relative mx-auto w-72 h-72 bg-white border border-slate-200 rounded-2xl flex items-center justify-center p-4 shadow-md">
                 {generatedQrUrl ? (
                   <img
                     src={generatedQrUrl}
                     alt="WhatsApp QR Code"
-                    className="w-full h-full object-contain rounded-lg"
+                    style={{ imageRendering: 'pixelated' }}
+                    className="w-full h-full object-contain block bg-white"
                   />
                 ) : (
                   <div className="flex flex-col items-center gap-2 text-slate-400">

@@ -308,13 +308,14 @@ export class EvolutionApiClient {
     try {
       const payload = {
         number: sanitizedNumber,
+        text: text,
+        textMessage: {
+          text: text,
+        },
         options: {
           delay: 1200,
           presence: 'composing',
           linkPreview: true,
-        },
-        textMessage: {
-          text: text,
         },
       };
 

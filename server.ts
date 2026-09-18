@@ -829,7 +829,9 @@ app.post('/api/instances/:id/pairing-code', async (req, res) => {
       });
     }
 
-    const pairingCode = result.qr?.pairingCode || result.qr?.code;
+    const rawCandidate = result.qr?.pairingCode;
+    const isRealCode = rawCandidate && String(rawCandidate).length <= 10 && !String(rawCandidate).includes("/") && !String(rawCandidate).includes("@") && !String(rawCandidate).includes("=");
+    const pairingCode = isRealCode ? String(rawCandidate).trim() : null;
 
     res.json({
       success: true,
