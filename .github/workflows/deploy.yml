@@ -1,0 +1,61 @@
+name: Deploy to Webdock VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy Wautomation to VPS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Execute remote deployment via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER || 'root' }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script_stop: true
+          script: |
+            echo "🚀 Starting automated deployment for wautomation.io..."
+            
+            # Target directory on VPS
+            APP_DIR="/opt/wautomation/app"
+            
+            if [ ! -d "$APP_DIR" ]; then
+              echo "Directory $APP_DIR does not exist. Cloning repository..."
+              mkdir -p /opt/wautomation
+              git clone https://github.com/baliadventours/wautomationio.git "$APP_DIR"
+            fi
+
+            cd "$APP_DIR"
+            
+            echo "📥 Fetching latest commits from GitHub..."
+            git fetch origin main
+            git reset --hard origin/main
+            
+            echo "📦 Installing dependencies..."
+            npm install --no-audit --no-fund
+            
+            echo "🔨 Building frontend & server bundle..."
+            npm run build
+            
+            echo "🔄 Restarting application process with PM2..."
+            if command -v pm2 >/dev/null 2>&1; then
+              pm2 restart wautomation || pm2 start dist/server.cjs --name wautomation
+              pm2 save
+            else
+              echo "PM2 not found. Installing globally..."
+              npm install -g pm2
+              pm2 start dist/server.cjs --name wautomation
+              pm2 save
+            fi
+            
+            echo "✅ Deployment completed successfully!"

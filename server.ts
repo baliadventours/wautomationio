@@ -625,6 +625,12 @@ app.post('/api/auth/switch-tenant', (req, res) => {
   }
 });
 
+// Download pre-compiled production bundle to VPS directly
+app.get('/api/vps/update-bundle', (req, res) => {
+  const bundlePath = path.join(process.cwd(), 'update-bundle.tar.gz');
+  res.sendFile(bundlePath);
+});
+
 // 3. WhatsApp Instances: List
 app.get('/api/instances', async (req, res) => {
   const tenant = getActiveTenant();
@@ -761,13 +767,14 @@ app.post('/api/instances', async (req, res) => {
     res.json({
       instance: newInstance,
       qr: qrResult.qr,
+      qr_code: qrResult.qr,
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 5. WhatsApp Instances: Get fresh QR code or connection state
+// 5. WhatsApp Instances: Get fresh QR code, pairing code or connection state
 app.get('/api/instances/:id/connect', async (req, res) => {
   try {
     const tenant = getActiveTenant();
@@ -777,7 +784,8 @@ app.get('/api/instances/:id/connect', async (req, res) => {
       return res.status(404).json({ error: 'Instance not found' });
     }
 
-    const qrResult = await evolutionApi.getConnectQr(instance.instance_name);
+    const phoneNumber = (req.query.number as string) || (req.query.phone as string);
+    const qrResult = await evolutionApi.getConnectQr(instance.instance_name, phoneNumber);
     const stateResult = await evolutionApi.getConnectionState(instance.instance_name);
 
     if (stateResult.state === 'open' && instance.status !== 'connected') {
@@ -791,6 +799,42 @@ app.get('/api/instances/:id/connect', async (req, res) => {
       state: stateResult.state,
       phone: stateResult.phone,
       status: instance.status,
+      error: qrResult.error,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5b. Request WhatsApp 8-digit Pairing Code via Phone Number
+app.post('/api/instances/:id/pairing-code', async (req, res) => {
+  try {
+    const tenant = getActiveTenant();
+    const instance = tenant.instances.find((i) => i.id === req.params.id);
+
+    if (!instance) {
+      return res.status(404).json({ error: 'Instance not found' });
+    }
+
+    const { phone_number } = req.body;
+    if (!phone_number) {
+      return res.status(400).json({ error: 'Phone number is required to request pairing code' });
+    }
+
+    const result = await evolutionApi.getConnectQr(instance.instance_name, phone_number);
+
+    if (!result.success) {
+      return res.status(502).json({
+        error: result.error || 'Failed to request pairing code from Evolution API',
+      });
+    }
+
+    const pairingCode = result.qr?.pairingCode || result.qr?.code;
+
+    res.json({
+      success: true,
+      pairingCode,
+      qr: result.qr,
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

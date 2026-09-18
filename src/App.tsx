@@ -220,7 +220,7 @@ export function App() {
     }
     const data = await res.json();
     setInstances((prev) => [...prev, data.instance]);
-    setQrModalData({ instance: data.instance, qr: data.qr_code });
+    setQrModalData({ instance: data.instance, qr: data.qr || data.qr_code || null });
     await fetchTenantData();
   };
 

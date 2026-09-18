@@ -10,7 +10,7 @@ export class EvolutionApiClient {
       process.env.EVOLUTION_API_BASE_URL ||
       process.env.EVOLUTION_API_URL ||
       process.env.EVOLUTION_SERVER_URL ||
-      ''
+      'http://127.0.0.1:8085'
     ).replace(/\/$/, '');
     this.adminApiKey =
       adminApiKey ||
@@ -152,25 +152,41 @@ export class EvolutionApiClient {
 
   /**
    * GET /instance/connect/{instanceName}
+   * If phoneNumber is provided, requests an 8-character Pairing Code for linking without QR
    */
-  async getConnectQr(instanceName: string): Promise<{ success: boolean; qr?: QrCodeData; error?: string }> {
+  async getConnectQr(
+    instanceName: string,
+    phoneNumber?: string
+  ): Promise<{ success: boolean; qr?: QrCodeData; error?: string }> {
     if (!this.isConfigured()) {
-      // Simulated QR response for preview testing
       return {
-        success: true,
-        qr: {
-          code: `2@simulated_qr_code_for_${instanceName}_scan_with_whatsapp`,
-          base64: '', // Client will generate svg/canvas QR if base64 is empty
-          count: 1,
-        },
+        success: false,
+        error: 'Evolution API server URL is not configured.',
       };
     }
 
+    const cleanNumber = phoneNumber ? phoneNumber.replace(/\D/g, '') : '';
+    const connectUrl = cleanNumber
+      ? `${this.baseUrl}/instance/connect/${instanceName}?number=${cleanNumber}`
+      : `${this.baseUrl}/instance/connect/${instanceName}`;
+
     try {
-      const res = await fetch(`${this.baseUrl}/instance/connect/${instanceName}`, {
+      let res = await fetch(connectUrl, {
         method: 'GET',
         headers: this.getHeaders(),
       });
+
+      // If instance doesn't exist yet on Evolution API, create it and retry
+      if (res.status === 404) {
+        await this.createInstance({
+          instanceName,
+          token: `tok_${instanceName}`,
+        });
+        res = await fetch(connectUrl, {
+          method: 'GET',
+          headers: this.getHeaders(),
+        });
+      }
 
       const data = await res.json();
       if (!res.ok) {
@@ -183,14 +199,14 @@ export class EvolutionApiClient {
       return {
         success: true,
         qr: {
-          pairingCode: data?.pairingCode,
+          pairingCode: data?.pairingCode || data?.code?.match(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/) ? data.code : undefined,
           code: data?.code,
           base64: data?.base64,
           count: data?.count,
         },
       };
     } catch (err: any) {
-      return { success: false, error: err.message };
+      return { success: false, error: err.message || 'Cannot reach Evolution API' };
     }
   }
 
