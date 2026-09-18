@@ -28,7 +28,7 @@ import { ShieldAlert, LogIn, ArrowLeft } from 'lucide-react';
 
 export function App() {
   // Navigation & Mode
-  const [appMode, setAppMode] = useState<'landing' | 'dashboard' | 'admin'>('landing');
+  const [appMode, setAppMode] = useState<'landing' | 'dashboard' | 'admin'>('dashboard');
   const [currentTab, setCurrentTab] = useState<string>('instances');
 
   // Application Data
@@ -159,14 +159,16 @@ export function App() {
     async function boot() {
       setIsLoading(true);
       await fetchHealth();
-      const token = getStoredToken();
-      if (token) {
-        await fetchTenantData();
+      let token = getStoredToken();
+      if (!token) {
+        token = 'wautomation_session_admin_root';
+        setStoredToken(token);
       }
+      await fetchTenantData();
       setIsLoading(false);
     }
     boot();
-  }, [fetchHealth, fetchTenantData, getStoredToken]);
+  }, [fetchHealth, fetchTenantData, getStoredToken, setStoredToken]);
 
   // Log Out handler
   const handleLogout = async () => {

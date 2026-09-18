@@ -147,20 +147,59 @@ const mockTenants: Record<string, TenantState> = {
     },
     instances: [
       {
-        id: 'inst_admin_core',
+        id: 'inst_bali_tours_root',
         user_id: 'superadmin-root',
-        instance_name: 'master_admin_telemetry',
+        instance_name: 'bali_tours',
         status: 'connected',
-        phone_number: '+62 811-0000-9999',
-        connected_at: new Date(Date.now() - 20 * 86400000).toISOString(),
-        evolution_token: encryptToken('evo_token_root_01'),
-        created_at: new Date(Date.now() - 20 * 86400000).toISOString(),
+        phone_number: '+62 812-4650-2939',
+        connected_at: new Date().toISOString(),
+        evolution_token: encryptToken('D952308E-D371-44C7-94FF-0A77E4C60CBC'),
+        created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
-        profile_name: 'Wautomation.io Master Line',
+        profile_name: 'Bali Adventours Live WhatsApp',
       },
     ],
-    messages: [],
-    automations: [],
+    messages: [
+      {
+        id: 'msg_root_01',
+        instance_id: 'inst_bali_tours_root',
+        instance_name: 'bali_tours',
+        direction: 'in',
+        to_number: '+62 812-4650-2939',
+        from_number: '+61 412 345 678',
+        body: 'Hello Bali Adventours! We want to book a sunrise tour for tomorrow.',
+        status: 'read',
+        created_at: new Date(Date.now() - 15 * 60000).toISOString(),
+      },
+      {
+        id: 'msg_root_02',
+        instance_id: 'inst_bali_tours_root',
+        instance_name: 'bali_tours',
+        direction: 'out',
+        to_number: '+61 412 345 678',
+        from_number: '+62 812-4650-2939',
+        body: 'Hello! Welcome to Bali Adventours! We have slots open for Mount Batur sunrise trek. How many guests?',
+        status: 'delivered',
+        created_at: new Date(Date.now() - 14 * 60000).toISOString(),
+      },
+    ],
+    automations: [
+      {
+        id: 'auto_root_01',
+        user_id: 'superadmin-root',
+        instance_id: 'inst_bali_tours_root',
+        name: 'Mount Batur Inquiry Auto-Reply',
+        trigger_type: 'keyword',
+        trigger_config: { keyword: 'batur', match_type: 'contains' },
+        action_config: {
+          reply_text:
+            'Hello! Our Mount Batur Sunrise Trek is $55/person, including breakfast at the summit and hotel pickup. Reply BOOK to reserve!',
+        },
+        enabled: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ],
   },
   'tenant-demo-user-1': {
     profile: {
@@ -184,37 +223,37 @@ const mockTenants: Record<string, TenantState> = {
     },
     instances: [
       {
-        id: 'inst_prod_01',
+        id: 'inst_bali_tours_live',
         user_id: 'tenant-demo-user-1',
-        instance_name: 'tenant_demo1_support',
+        instance_name: 'bali_tours',
         status: 'connected',
-        phone_number: '+62 812-3456-7890',
-        connected_at: new Date(Date.now() - 5 * 86400000).toISOString(),
-        evolution_token: encryptToken('evo_token_secret_1'),
-        created_at: new Date(Date.now() - 5 * 86400000).toISOString(),
+        phone_number: '+62 812-4650-2939',
+        connected_at: new Date().toISOString(),
+        evolution_token: encryptToken('D952308E-D371-44C7-94FF-0A77E4C60CBC'),
+        created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
-        profile_name: 'Bali Support Desk',
+        profile_name: 'Bali Adventours Live WhatsApp',
       },
     ],
     messages: [
       {
         id: 'msg_01',
-        instance_id: 'inst_prod_01',
-        instance_name: 'tenant_demo1_support',
+        instance_id: 'inst_bali_tours_live',
+        instance_name: 'bali_tours',
         direction: 'in',
-        to_number: '+62 812-3456-7890',
-        from_number: '+1 (415) 555-0199',
+        to_number: '+62 812-4650-2939',
+        from_number: '+61 412 345 678',
         body: 'Hello! What are your tour prices for Mount Batur?',
         status: 'read',
         created_at: new Date(Date.now() - 40 * 60000).toISOString(),
       },
       {
         id: 'msg_02',
-        instance_id: 'inst_prod_01',
-        instance_name: 'tenant_demo1_support',
+        instance_id: 'inst_bali_tours_live',
+        instance_name: 'bali_tours',
         direction: 'out',
-        to_number: '+1 (415) 555-0199',
-        from_number: '+62 812-3456-7890',
+        to_number: '+61 412 345 678',
+        from_number: '+62 812-4650-2939',
         body: 'Hi there! Our Mount Batur Sunrise Trek is $55/person, including breakfast and hotel transfer. Reply BOOK to reserve!',
         status: 'delivered',
         created_at: new Date(Date.now() - 39 * 60000).toISOString(),
@@ -224,7 +263,7 @@ const mockTenants: Record<string, TenantState> = {
       {
         id: 'auto_01',
         user_id: 'tenant-demo-user-1',
-        instance_id: 'inst_prod_01',
+        instance_id: 'inst_bali_tours_live',
         name: 'Pricing Inquiries Auto-Reply',
         trigger_type: 'keyword',
         trigger_config: { keyword: 'price', match_type: 'contains' },
@@ -239,7 +278,7 @@ const mockTenants: Record<string, TenantState> = {
       {
         id: 'auto_02',
         user_id: 'tenant-demo-user-1',
-        instance_id: 'inst_prod_01',
+        instance_id: 'inst_bali_tours_live',
         name: 'Greeting / Welcome Bot',
         trigger_type: 'keyword',
         trigger_config: { keyword: 'hello', match_type: 'contains' },
@@ -514,6 +553,26 @@ app.get('/api/health', async (req, res) => {
   });
 });
 
+// Update VPS Evolution API Configuration dynamically
+app.post('/api/vps/config', async (req, res) => {
+  const { baseUrl, apiKey } = req.body;
+  if (!baseUrl) {
+    return res.status(400).json({ error: 'baseUrl is required' });
+  }
+
+  const key = apiKey || '429683C4C977415CAAFCCE10F7D57E11';
+  evolutionApi.setConfig(baseUrl, key);
+  const health = await evolutionApi.checkHealth();
+
+  res.json({
+    success: health.ok,
+    connected: health.ok,
+    message: health.message,
+    version: health.version,
+    baseUrl: evolutionApi.getBaseUrl(),
+  });
+});
+
 // 2. Auth & Current Tenant Profile
 app.get('/api/auth/me', async (req, res) => {
   const auth = getAuthUser(req);
@@ -585,6 +644,64 @@ app.get('/api/instances', async (req, res) => {
   }
 
   res.json({ instances: tenant.instances });
+});
+
+// Sync all instances directly from VPS Evolution API
+app.post('/api/instances/sync-vps', async (req, res) => {
+  try {
+    const tenant = getActiveTenant();
+    const evoResult = await evolutionApi.fetchInstances();
+
+    if (!evoResult.success) {
+      return res.status(502).json({
+        error: evoResult.error || 'Failed to fetch instances from Evolution API',
+      });
+    }
+
+    const liveList = evoResult.instances || [];
+    let added = 0;
+    let updated = 0;
+
+    for (const evoInst of liveList) {
+      const name = evoInst.instance?.instanceName || evoInst.instanceName || evoInst.name;
+      if (!name) continue;
+
+      const connectionStatus = evoInst.instance?.status || evoInst.status || evoInst.connectionStatus;
+      const isConnected = connectionStatus === 'open' || connectionStatus === 'connected';
+      const owner = evoInst.instance?.owner || evoInst.owner;
+
+      const existing = tenant.instances.find((i) => i.instance_name === name);
+      if (existing) {
+        existing.status = isConnected ? 'connected' : existing.status;
+        if (owner) existing.phone_number = owner;
+        updated++;
+      } else {
+        const newInst: WhatsAppInstance = {
+          id: evoInst.instance?.instanceId || `inst_vps_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+          user_id: tenant.profile.id,
+          instance_name: name,
+          status: isConnected ? 'connected' : 'connecting',
+          phone_number: owner || null,
+          connected_at: isConnected ? new Date().toISOString() : null,
+          evolution_token: encryptToken(evoInst.hash?.apikey || 'evo_token_vps'),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          profile_name: `${name} (VPS Live)`,
+        };
+        tenant.instances.unshift(newInst);
+        added++;
+      }
+    }
+
+    res.json({
+      success: true,
+      added,
+      updated,
+      instances: tenant.instances,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // 4. WhatsApp Instances: Create new instance & generate QR

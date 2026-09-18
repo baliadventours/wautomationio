@@ -5,8 +5,23 @@ export class EvolutionApiClient {
   private adminApiKey: string;
 
   constructor(baseUrl?: string, adminApiKey?: string) {
-    this.baseUrl = (baseUrl || process.env.EVOLUTION_API_BASE_URL || '').replace(/\/$/, '');
-    this.adminApiKey = adminApiKey || process.env.EVOLUTION_API_ADMIN_KEY || '';
+    this.baseUrl = (
+      baseUrl ||
+      process.env.EVOLUTION_API_BASE_URL ||
+      process.env.EVOLUTION_API_URL ||
+      process.env.EVOLUTION_SERVER_URL ||
+      ''
+    ).replace(/\/$/, '');
+    this.adminApiKey =
+      adminApiKey ||
+      process.env.EVOLUTION_API_ADMIN_KEY ||
+      process.env.EVOLUTION_API_KEY ||
+      '429683C4C977415CAAFCCE10F7D57E11';
+  }
+
+  public setConfig(baseUrl: string, adminApiKey: string) {
+    this.baseUrl = baseUrl.replace(/\/$/, '');
+    this.adminApiKey = adminApiKey;
   }
 
   public isConfigured(): boolean {
@@ -46,6 +61,32 @@ export class EvolutionApiClient {
       return { ok: true, message: 'Connected to Evolution API', version: data?.version || 'v1/v2' };
     } catch (err: any) {
       return { ok: false, message: `Could not reach Evolution API at ${this.baseUrl}: ${err.message}` };
+    }
+  }
+
+  /**
+   * GET /instance/fetchInstances
+   */
+  async fetchInstances(): Promise<{ success: boolean; instances?: any[]; error?: string }> {
+    if (!this.isConfigured()) {
+      return { success: false, error: 'Evolution API is not configured' };
+    }
+
+    try {
+      const res = await fetch(`${this.baseUrl}/instance/fetchInstances`, {
+        method: 'GET',
+        headers: this.getHeaders(),
+      });
+
+      if (!res.ok) {
+        return { success: false, error: `HTTP ${res.status}: ${res.statusText}` };
+      }
+
+      const data = await res.json();
+      const instances = Array.isArray(data) ? data : data?.instances || [];
+      return { success: true, instances };
+    } catch (err: any) {
+      return { success: false, error: err.message };
     }
   }
 
@@ -157,7 +198,7 @@ export class EvolutionApiClient {
    * GET /instance/connectionState/{instanceName}
    */
   async getConnectionState(instanceName: string): Promise<{
-    state: 'open' | 'connecting' | 'close' | 'refused';
+    state: 'open' | 'connecting' | 'close' | 'refused' | 'unreachable';
     phone?: string;
   }> {
     if (!this.isConfigured()) {
@@ -181,7 +222,7 @@ export class EvolutionApiClient {
         phone: data?.instance?.owner || data?.owner,
       };
     } catch {
-      return { state: 'close' };
+      return { state: 'unreachable' };
     }
   }
 

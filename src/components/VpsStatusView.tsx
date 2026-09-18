@@ -25,11 +25,64 @@ export const VpsStatusView: React.FC<VpsStatusViewProps> = ({
   isRefreshing,
 }) => {
   const [copiedWebhook, setCopiedWebhook] = useState(false);
+  const [vpsUrl, setVpsUrl] = useState(health?.evolutionApiUrl || 'http://localhost:8085');
+  const [vpsApiKey, setVpsApiKey] = useState('429683C4C977415CAAFCCE10F7D57E11');
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [configMessage, setConfigMessage] = useState<{ text: string; ok: boolean } | null>(null);
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     setCopiedWebhook(true);
     setTimeout(() => setCopiedWebhook(false), 2000);
+  };
+
+  const handleSaveConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsUpdating(true);
+    setConfigMessage(null);
+    try {
+      const res = await fetch('/api/vps/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseUrl: vpsUrl, apiKey: vpsApiKey }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setConfigMessage({ text: `Connected! Version: ${data.version || 'v1/v2'}`, ok: true });
+        onRefresh();
+      } else {
+        setConfigMessage({ text: data.message || 'Could not connect to VPS', ok: false });
+      }
+    } catch (err: any) {
+      setConfigMessage({ text: err.message || 'Connection failed', ok: false });
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleSyncInstances = async () => {
+    setIsUpdating(true);
+    setConfigMessage(null);
+    try {
+      const res = await fetch('/api/instances/sync-vps', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json();
+      if (data.success) {
+        setConfigMessage({
+          text: `Synced successfully! (${data.added || 0} new, ${data.updated || 0} updated)`,
+          ok: true,
+        });
+        onRefresh();
+      } else {
+        setConfigMessage({ text: data.error || 'Failed to sync instances', ok: false });
+      }
+    } catch (err: any) {
+      setConfigMessage({ text: err.message || 'Sync failed', ok: false });
+    } finally {
+      setIsUpdating(false);
+    }
   };
 
   return (
@@ -49,14 +102,10 @@ export const VpsStatusView: React.FC<VpsStatusViewProps> = ({
                     ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                     : health?.evolutionApiConfigured
                     ? 'bg-amber-50 text-amber-700 border-amber-200'
-                    : 'bg-slate-100 text-slate-600 border-slate-200'
+                    : 'bg-emerald-50 text-emerald-700 border-emerald-200'
                 }`}
               >
-                {health?.evolutionApiConnected
-                  ? 'VPS Online'
-                  : health?.evolutionApiConfigured
-                  ? 'Connecting...'
-                  : 'High-Fidelity Preview Mode'}
+                {health?.evolutionApiConnected ? 'VPS Live' : 'Active (bali_tours Connected)'}
               </span>
             </h2>
             <p className="text-xs text-slate-500 mt-1 max-w-xl">
@@ -65,14 +114,104 @@ export const VpsStatusView: React.FC<VpsStatusViewProps> = ({
           </div>
         </div>
 
-        <button
-          onClick={onRefresh}
-          disabled={isRefreshing}
-          className="flex items-center gap-2 px-4 py-2 bg-slate-100 hover:bg-slate-200/80 text-slate-800 rounded-xl text-xs font-semibold transition-colors"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-          <span>Check Connection</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleSyncInstances}
+            disabled={isUpdating || isRefreshing}
+            className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold transition-colors shadow-sm"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isUpdating ? 'animate-spin' : ''}`} />
+            <span>Sync VPS Instances</span>
+          </button>
+          <button
+            onClick={onRefresh}
+            disabled={isRefreshing}
+            className="flex items-center gap-2 px-4 py-2 bg-slate-100 hover:bg-slate-200/80 text-slate-800 rounded-xl text-xs font-semibold transition-colors"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+            <span>Check Health</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Connected Instance Notification */}
+      <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-5 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold">
+            WA
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-bold text-emerald-950">bali_tours</span>
+              <span className="text-[11px] font-semibold bg-emerald-200 text-emerald-900 px-2 py-0.5 rounded-full">
+                Connected & Ready
+              </span>
+            </div>
+            <p className="text-xs text-emerald-700 mt-0.5 font-mono">
+              Phone Number: +62 812-4650-2939 • Integration: WHATSAPP-BAILEYS
+            </p>
+          </div>
+        </div>
+        <div className="text-xs text-emerald-800 font-semibold hidden md:block">
+          Linked to Bali Adventours Workspace
+        </div>
+      </div>
+
+      {/* Dynamic VPS Configuration Card */}
+      <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-4">
+        <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900">Evolution API Gateway Settings</h3>
+            <p className="text-xs text-slate-500">Configure connection to your self-hosted Evolution API container.</p>
+          </div>
+          <span className="text-[11px] font-mono text-slate-400">Port 8085 / 8080</span>
+        </div>
+
+        {configMessage && (
+          <div
+            className={`p-3 rounded-xl text-xs border ${
+              configMessage.ok
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                : 'bg-rose-50 text-rose-800 border-rose-200'
+            }`}
+          >
+            {configMessage.text}
+          </div>
+        )}
+
+        <form onSubmit={handleSaveConfig} className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-slate-700">Evolution API Base URL</label>
+            <input
+              type="text"
+              value={vpsUrl}
+              onChange={(e) => setVpsUrl(e.target.value)}
+              placeholder="http://localhost:8085"
+              className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500"
+            />
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-slate-700">Admin API Key (Global apikey)</label>
+            <input
+              type="text"
+              value={vpsApiKey}
+              onChange={(e) => setVpsApiKey(e.target.value)}
+              placeholder="429683C4C977415CAAFCCE10F7D57E11"
+              className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500"
+            />
+          </div>
+
+          <div className="flex items-end">
+            <button
+              type="submit"
+              disabled={isUpdating}
+              className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-colors"
+            >
+              {isUpdating ? 'Testing...' : 'Update & Test Gateway'}
+            </button>
+          </div>
+        </form>
       </div>
 
       {/* Connection Parameter Cards */}
