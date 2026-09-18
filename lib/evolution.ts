@@ -199,7 +199,11 @@ export class EvolutionApiClient {
       return {
         success: true,
         qr: {
-          pairingCode: data?.pairingCode || data?.code?.match(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/) ? data.code : undefined,
+          pairingCode: (data?.pairingCode && String(data.pairingCode).length <= 12)
+            ? data.pairingCode
+            : (data?.code && /^[A-Za-z0-9]{4}-?[A-Za-z0-9]{4}$/.test(String(data.code).trim()))
+            ? data.code
+            : undefined,
           code: data?.code,
           base64: data?.base64,
           count: data?.count,
