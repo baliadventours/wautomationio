@@ -136,23 +136,28 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
       });
 
       const data = await res.json();
-      const isValidCode = (c: any) => Boolean(c && typeof c === 'string' && c.length <= 10 && !c.includes('/') && !c.includes('@') && !c.includes('='));
+      const isValidCode = (c: any) => Boolean(c && typeof c === 'string' && c.length <= 12 && !c.includes('/') && !c.includes('@') && !c.includes('='));
       
+      if (data?.qr) {
+        setQrData(data.qr);
+      }
+
       if (res.ok && isValidCode(data.pairingCode)) {
         setPairingCode(data.pairingCode);
+        setErrorMessage('');
       } else {
         // Try connect endpoint with number
         const fallbackRes = await fetch(`/api/instances/${instance.id}/connect?number=${cleaned}`);
         const fallbackData = await fallbackRes.json();
         const candidate = fallbackData?.qr?.pairingCode;
+        if (fallbackData?.qr) {
+          setQrData(fallbackData.qr);
+        }
         if (isValidCode(candidate)) {
           setPairingCode(candidate);
+          setErrorMessage('');
         } else {
-          // If Evolution API returned a QR string instead of 8-character code
-          if (fallbackData?.qr) {
-            setQrData(fallbackData.qr);
-          }
-          setErrorMessage('Evolution API returned a QR scan token instead of a numeric pairing code. Please use the "Scan QR Code" tab above to link your phone.');
+          setErrorMessage('Evolution API generated a QR code for this line. You can link your phone immediately on the "Scan QR Code" tab.');
         }
       }
     } catch (err: any) {
@@ -445,7 +450,24 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
           {errorMessage && (
             <div className="mt-4 text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-xl p-3 flex items-start gap-2">
               <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
-              <span>{errorMessage}</span>
+              <div className="flex-1 space-y-2">
+                <span>{errorMessage}</span>
+                {qrData && activeTab === 'phone' && (
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTab('qr');
+                        setErrorMessage('');
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs shadow-sm transition-all"
+                    >
+                      <QrCode className="w-3.5 h-3.5" />
+                      <span>Switch to QR Code Tab</span>
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>

@@ -1,0 +1,34 @@
+# Caddy reverse proxy for Evolution API
+# Provides automated Let's Encrypt TLS certificates and security headers
+
+{$DOMAIN_NAME:wa.yourdomain.com} {
+    # TLS with automated ACME registration
+    tls {$LETSENCRYPT_EMAIL:admin@yourdomain.com}
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # Reverse proxy to Evolution API container
+    reverse_proxy evolution_api:8080 {
+        header_up Host {host}
+        header_up X-Real-IP {remote}
+        header_up X-Forwarded-For {remote}
+        header_up X-Forwarded-Proto {scheme}
+
+        # WebSocket support for Baileys live event streaming
+        header_up Upgrade {>Upgrade}
+        header_up Connection {>Connection}
+    }
+
+    # Logging
+    log {
+        output stdout
+        format json
+    }
+}

@@ -180,9 +180,10 @@ export class EvolutionApiClient {
     }
 
     const cleanNumber = phoneNumber ? phoneNumber.replace(/\D/g, '') : '';
+    const encodedInstance = encodeURIComponent(instanceName);
     const connectUrl = cleanNumber
-      ? `${this.baseUrl}/instance/connect/${instanceName}?number=${cleanNumber}`
-      : `${this.baseUrl}/instance/connect/${instanceName}`;
+      ? `${this.baseUrl}/instance/connect/${encodedInstance}?number=${cleanNumber}`
+      : `${this.baseUrl}/instance/connect/${encodedInstance}`;
 
     try {
       let res = await fetch(connectUrl, {
@@ -210,14 +211,42 @@ export class EvolutionApiClient {
         };
       }
 
+      let pairingCode = (data?.pairingCode && String(data.pairingCode).length <= 12)
+        ? String(data.pairingCode).trim()
+        : (data?.code && /^[A-Za-z0-9]{4}-?[A-Za-z0-9]{4}$/.test(String(data.code).trim()))
+        ? String(data.code).trim()
+        : undefined;
+
+      // If a pairing code was requested with a phone number, but the socket was previously in QR mode,
+      // restart the instance so Baileys can transition to pairing code mode, then query once more.
+      if (cleanNumber && !pairingCode) {
+        try {
+          await fetch(`${this.baseUrl}/instance/restart/${encodedInstance}`, {
+            method: 'POST',
+            headers: this.getHeaders(),
+          });
+          await new Promise((r) => setTimeout(r, 1500));
+          const retryRes = await fetch(connectUrl, {
+            method: 'GET',
+            headers: this.getHeaders(),
+          });
+          if (retryRes.ok) {
+            const retryData = await retryRes.json();
+            if (retryData?.pairingCode && String(retryData.pairingCode).length <= 12) {
+              pairingCode = String(retryData.pairingCode).trim();
+            }
+            if (retryData?.code) data.code = retryData.code;
+            if (retryData?.base64) data.base64 = retryData.base64;
+          }
+        } catch (_) {
+          // ignore restart error
+        }
+      }
+
       return {
         success: true,
         qr: {
-          pairingCode: (data?.pairingCode && String(data.pairingCode).length <= 12)
-            ? data.pairingCode
-            : (data?.code && /^[A-Za-z0-9]{4}-?[A-Za-z0-9]{4}$/.test(String(data.code).trim()))
-            ? data.code
-            : undefined,
+          pairingCode,
           code: data?.code,
           base64: data?.base64,
           count: data?.count,

@@ -17,6 +17,8 @@ import { MessageLogsView } from './components/MessageLogsView';
 import { MessengerView } from './components/MessengerView';
 import { VpsStatusView } from './components/VpsStatusView';
 import { BillingView } from './components/BillingView';
+import { ApiKeysManagement } from './components/ApiKeysManagement';
+import { ApiDocsView } from './components/ApiDocsView';
 import { QrConnectModal } from './components/QrConnectModal';
 import { SendMessageModal } from './components/SendMessageModal';
 import { CreateInstanceModal } from './components/CreateInstanceModal';
@@ -638,6 +640,14 @@ export function App() {
                   subscription={subscription}
                   onUpgradePlan={handleUpgradePlan}
                 />
+              )}
+
+              {currentTab === 'api-keys' && (
+                <ApiKeysManagement />
+              )}
+
+              {currentTab === 'api-docs' && (
+                <ApiDocsView />
               )}
             </>
           )}

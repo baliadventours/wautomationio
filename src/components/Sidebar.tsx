@@ -9,6 +9,8 @@ import {
   ShieldCheck,
   ExternalLink,
   LogOut,
+  Key,
+  Code2,
 } from 'lucide-react';
 import { Subscription } from '../types';
 
@@ -36,6 +38,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'automations', label: 'Keyword Automations', icon: Zap },
     { id: 'logs', label: 'Message Logs', icon: ListFilter },
     { id: 'messenger', label: 'Send Test Message', icon: Send },
+    { id: 'api-keys', label: 'Developer API Keys', icon: Key },
+    { id: 'api-docs', label: 'Public API Docs', icon: Code2 },
     { id: 'vps', label: 'Evolution API & VPS', icon: Server },
     { id: 'billing', label: 'Plans & Usage', icon: CreditCard },
   ];

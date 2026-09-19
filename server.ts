@@ -14,6 +14,7 @@ import {
   Subscription,
   UserProfile,
 } from './src/types';
+import { publicGatewayRouter } from './lib/public-gateway';
 
 dotenv.config();
 
@@ -21,6 +22,7 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+app.use('/v1', publicGatewayRouter);
 
 // ---------------------------------------------------------------------------
 // In-Memory Fallback State (when Supabase is not connected in dev/preview)

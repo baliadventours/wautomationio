@@ -1,0 +1,123 @@
+# Multi-Tenant Evolution API VPS Stack
+# Services:
+#   1. postgres (v16-alpine) - persistent WhatsApp session database
+#   2. redis (v7-alpine) - session state caching & high-speed event queues
+#   3. evolution_api - fork (github.com/baliadventours/evolution-api) or upstream (evoapicloud/evolution-api:latest)
+#   4. caddy - automated Let's Encrypt HTTPS reverse proxy with security headers
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: evolution_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-evolution_db}
+      POSTGRES_USER: ${POSTGRES_USER:-evolution_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # strictly bound to localhost loopback only - never exposed to public internet
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-evolution_user} -d ${POSTGRES_DB:-evolution_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - evolution_internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: evolution_redis
+    restart: always
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"]
+    volumes:
+      - redis_data:/data
+    ports:
+      # strictly bound to localhost loopback only
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - evolution_internal
+
+  evolution_api:
+    image: evoapicloud/evolution-api:latest
+    container_name: evolution_api
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      SERVER_PORT: 8080
+      SERVER_URL: ${SERVER_URL:-http://localhost:8080}
+      AUTHENTICATION_API_KEY: ${AUTHENTICATION_API_KEY:?Set AUTHENTICATION_API_KEY in .env}
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      DATABASE_SAVE_MESSAGE_UPDATE: "true"
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CACHE_REDIS_PREFIX_KEY: evolution
+      CACHE_REDIS_SAVE_INSTANCES: "true"
+      WEBHOOK_GLOBAL_ENABLED: ${WEBHOOK_GLOBAL_ENABLED:-true}
+      WEBHOOK_GLOBAL_URL: ${WEBHOOK_GLOBAL_URL:-}
+    volumes:
+      - evolution_instances:/evolution/instances
+    ports:
+      # bound to localhost loopback only so Caddy or Gateway can reverse-proxy
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ | grep -q 'Evolution API' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - evolution_internal
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: evolution_caddy
+    restart: always
+    depends_on:
+      - evolution_api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN_NAME: ${DOMAIN_NAME:-wa.yourdomain.com}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL:-admin@yourdomain.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - evolution_internal
+
+volumes:
+  postgres_data:
+    name: evolution_postgres_data
+  redis_data:
+    name: evolution_redis_data
+  evolution_instances:
+    name: evolution_instances_data
+  caddy_data:
+    name: evolution_caddy_data
+  caddy_config:
+    name: evolution_caddy_config
+
+networks:
+  evolution_internal:
+    driver: bridge
