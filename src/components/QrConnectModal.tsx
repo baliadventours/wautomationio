@@ -29,8 +29,8 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
   onClose,
   onSuccess,
 }) => {
-  // Tabs: 'phone' (pairing code) or 'qr' (QR code)
-  const [activeTab, setActiveTab] = useState<'phone' | 'qr'>('phone');
+  // Tabs: 'qr' (QR code) or 'phone' (pairing code)
+  const [activeTab, setActiveTab] = useState<'qr' | 'phone'>('qr');
   
   // Phone Number Pairing State
   const [phoneNumber, setPhoneNumber] = useState<string>(instance.phone_number || '');
@@ -59,21 +59,34 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
     }
   };
 
+  const getAuthHeaders = useCallback((): Record<string, string> => {
+    if (typeof window === 'undefined') return { 'Content-Type': 'application/json' };
+    const token =
+      localStorage.getItem('wautomation_auth_token') ||
+      localStorage.getItem('wapilot_auth_token') ||
+      '';
+    return {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    };
+  }, []);
+
   // 1. Generate QR Code image data URL if raw code string is provided without base64
   useEffect(() => {
     async function generateQrImage() {
       if (qrData?.base64) {
-        setGeneratedQrUrl(qrData.base64.startsWith('data:') ? qrData.base64 : `data:image/png;base64,${qrData.base64}`);
+        const clean = qrData.base64.trim().replace(/^"|"$/g, '');
+        setGeneratedQrUrl(clean.startsWith('data:') ? clean : `data:image/png;base64,${clean}`);
       } else if (qrData?.code) {
         try {
           const url = await QRCode.toDataURL(qrData.code, {
-            width: 320,
+            width: 360,
             margin: 2,
             color: {
               dark: '#000000',
               light: '#ffffff',
             },
-            errorCorrectionLevel: 'L',
+            errorCorrectionLevel: 'M',
           });
           setGeneratedQrUrl(url);
         } catch (e) {
@@ -84,6 +97,13 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
     generateQrImage();
   }, [qrData]);
 
+  // If no initial QR code provided, fetch fresh one immediately on mount
+  useEffect(() => {
+    if (!initialQr?.base64 && !initialQr?.code && !isConnected) {
+      handleRefreshQr();
+    }
+  }, []);
+
   // 2. Poll for connection state every 2.5 seconds using lightweight /status
   // NOTE: Never poll /connect, because calling /connect on Baileys resets the QR token!
   useEffect(() => {
@@ -92,7 +112,9 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
     const interval = setInterval(async () => {
       try {
         setPollCount((prev) => prev + 1);
-        const res = await fetch(`/api/instances/${instance.id}/status`);
+        const res = await fetch(`/api/instances/${instance.id}/status`, {
+          headers: getAuthHeaders(),
+        });
         if (!res.ok) return;
 
         const data = await res.json();
@@ -116,7 +138,7 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
     }, 2500);
 
     return () => clearInterval(interval);
-  }, [instance, isPolling, isConnected, onSuccess, phoneNumber]);
+  }, [instance, isPolling, isConnected, onSuccess, phoneNumber, getAuthHeaders]);
 
   // Initial load of QR if on QR tab and not already provided
   useEffect(() => {
@@ -140,7 +162,7 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
     try {
       const res = await fetch(`/api/instances/${instance.id}/pairing-code`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ phone_number: cleaned }),
       });
 
@@ -156,7 +178,9 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
         setErrorMessage('');
       } else {
         // Try connect endpoint with number
-        const fallbackRes = await fetch(`/api/instances/${instance.id}/connect?number=${cleaned}`);
+        const fallbackRes = await fetch(`/api/instances/${instance.id}/connect?number=${cleaned}`, {
+          headers: getAuthHeaders(),
+        });
         const fallbackData = await safeJson(fallbackRes);
         const candidate = fallbackData?.qr?.pairingCode;
         if (fallbackData?.qr) {
@@ -181,7 +205,9 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
     setIsRefreshingQr(true);
     setErrorMessage('');
     try {
-      const res = await fetch(`/api/instances/${instance.id}/connect`);
+      const res = await fetch(`/api/instances/${instance.id}/connect`, {
+        headers: getAuthHeaders(),
+      });
       const data = await safeJson(res);
       if (data?.qr) {
         setQrData(data.qr);
@@ -203,7 +229,7 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
       const phoneToUse = phoneNumber || instance.phone_number || '+62 812-4650-2939';
       const res = await fetch(`/api/instances/${instance.id}/simulate-scan`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ phone_number: phoneToUse }),
       });
       const data = await safeJson(res);

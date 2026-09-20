@@ -1,4 +1,5 @@
 import { QrCodeData } from '../src/types';
+import QRCode from 'qrcode';
 
 export class EvolutionApiClient {
   private baseUrl: string;
@@ -97,7 +98,7 @@ export class EvolutionApiClient {
     instanceName: string;
     token: string;
     webhookUrl?: string;
-  }): Promise<{ success: boolean; data?: any; error?: string }> {
+  }): Promise<{ success: boolean; data?: any; qr?: QrCodeData; error?: string }> {
     if (!this.isConfigured()) {
       // Return simulated success for preview if not configured
       return {
@@ -127,20 +128,35 @@ export class EvolutionApiClient {
         body: JSON.stringify(payload),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         const errorMsg = Array.isArray(data?.response?.message)
           ? data.response.message.join(', ')
           : typeof data?.response?.message === 'string'
           ? data.response.message
           : data?.message || data?.error || `HTTP ${res.status}`;
+
+        // If instance already exists, treat as recoverable
+        if (
+          String(errorMsg).toLowerCase().includes('already in use') ||
+          String(errorMsg).toLowerCase().includes('already exists')
+        ) {
+          return {
+            success: true,
+            data: {
+              instance: { instanceName: params.instanceName, status: 'connecting' },
+              hash: { apikey: params.token },
+            },
+          };
+        }
+
         return {
           success: false,
           error: errorMsg,
         };
       }
 
-      // If webhook is provided, configure it separately so it works seamlessly on v1 and v2
+      // Configure webhook if provided
       if (params.webhookUrl) {
         try {
           await fetch(`${this.baseUrl}/webhook/set/${params.instanceName}`, {
@@ -153,12 +169,39 @@ export class EvolutionApiClient {
               events: ['CONNECTION_UPDATE', 'MESSAGES_UPSERT', 'QRCODE_UPDATED'],
             }),
           });
-        } catch (_) {
-          // Webhook setting is non-blocking
-        }
+        } catch (_) {}
       }
 
-      return { success: true, data };
+      // Extract real QR if returned immediately in create response
+      let createdQr: QrCodeData | undefined;
+      const qrObj = data?.qrcode || data;
+      const rawBase64 = data?.base64 || data?.qrcode?.base64 || (typeof qrObj === 'object' && qrObj?.base64);
+      const rawCode = data?.code || data?.qrcode?.code || (typeof qrObj === 'object' && qrObj?.code);
+
+      if (rawBase64 && typeof rawBase64 === 'string') {
+        const trimmed = rawBase64.trim().replace(/^"|"$/g, '');
+        createdQr = {
+          code: rawCode,
+          base64: trimmed.startsWith('data:image') ? trimmed : `data:image/png;base64,${trimmed}`,
+          count: 1,
+        };
+      } else if (rawCode && typeof rawCode === 'string' && rawCode.length > 10) {
+        try {
+          const generatedUrl = await QRCode.toDataURL(rawCode, {
+            errorCorrectionLevel: 'M',
+            margin: 2,
+            width: 360,
+            color: { dark: '#000000', light: '#ffffff' },
+          });
+          createdQr = {
+            code: rawCode,
+            base64: generatedUrl,
+            count: 1,
+          };
+        } catch (_) {}
+      }
+
+      return { success: true, data, qr: createdQr };
     } catch (err: any) {
       return { success: false, error: err.message };
     }
@@ -171,7 +214,7 @@ export class EvolutionApiClient {
   async getConnectQr(
     instanceName: string,
     phoneNumber?: string
-  ): Promise<{ success: boolean; qr?: QrCodeData; error?: string }> {
+  ): Promise<{ success: boolean; qr?: QrCodeData; state?: string; phone?: string; error?: string }> {
     if (!this.isConfigured()) {
       return {
         success: false,
@@ -197,13 +240,14 @@ export class EvolutionApiClient {
           instanceName,
           token: `tok_${instanceName}`,
         });
+        await new Promise((r) => setTimeout(r, 600));
         res = await fetch(connectUrl, {
           method: 'GET',
           headers: this.getHeaders(),
         });
       }
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         return {
           success: false,
@@ -211,45 +255,78 @@ export class EvolutionApiClient {
         };
       }
 
-      let pairingCode = (data?.pairingCode && String(data.pairingCode).length <= 12)
+      // Check if instance is already connected
+      const state = data?.instance?.state || data?.state;
+      if (state === 'open') {
+        return {
+          success: true,
+          state: 'open',
+          phone: data?.instance?.owner || data?.owner,
+        };
+      }
+
+      const qrObj = data?.qrcode || data;
+      let pairingCode = (qrObj?.pairingCode && String(qrObj.pairingCode).length <= 12)
+        ? String(qrObj.pairingCode).trim()
+        : (data?.pairingCode && String(data.pairingCode).length <= 12)
         ? String(data.pairingCode).trim()
-        : (data?.code && /^[A-Za-z0-9]{4}-?[A-Za-z0-9]{4}$/.test(String(data.code).trim()))
-        ? String(data.code).trim()
         : undefined;
 
-      // If a pairing code was requested with a phone number, but the socket was previously in QR mode,
-      // restart the instance so Baileys can transition to pairing code mode, then query once more.
+      let rawBase64 = data?.base64 || data?.qrcode?.base64 || (typeof qrObj === 'object' && qrObj?.base64);
+      let rawCode = data?.code || data?.qrcode?.code || (typeof qrObj === 'object' && qrObj?.code);
+
+      // If pairing code requested but not received, restart instance to allow pairing code mode
       if (cleanNumber && !pairingCode) {
         try {
           await fetch(`${this.baseUrl}/instance/restart/${encodedInstance}`, {
             method: 'POST',
             headers: this.getHeaders(),
           });
-          await new Promise((r) => setTimeout(r, 1500));
+          await new Promise((r) => setTimeout(r, 1200));
           const retryRes = await fetch(connectUrl, {
             method: 'GET',
             headers: this.getHeaders(),
           });
           if (retryRes.ok) {
-            const retryData = await retryRes.json();
-            if (retryData?.pairingCode && String(retryData.pairingCode).length <= 12) {
-              pairingCode = String(retryData.pairingCode).trim();
+            const retryData = await retryRes.json().catch(() => ({}));
+            const retryQr = retryData?.qrcode || retryData;
+            if (retryQr?.pairingCode && String(retryQr.pairingCode).length <= 12) {
+              pairingCode = String(retryQr.pairingCode).trim();
             }
-            if (retryData?.code) data.code = retryData.code;
-            if (retryData?.base64) data.base64 = retryData.base64;
+            if (retryQr?.code) rawCode = retryQr.code;
+            if (retryQr?.base64) rawBase64 = retryQr.base64;
           }
-        } catch (_) {
-          // ignore restart error
+        } catch (_) {}
+      }
+
+      // Format clean QR Base64 image
+      let formattedBase64: string | undefined;
+      if (rawBase64 && typeof rawBase64 === 'string') {
+        const trimmed = rawBase64.trim().replace(/^"|"$/g, '');
+        formattedBase64 = trimmed.startsWith('data:image') ? trimmed : `data:image/png;base64,${trimmed}`;
+      } else if (rawCode && typeof rawCode === 'string' && rawCode.length > 10) {
+        // Render the exact real WhatsApp Baileys code string to QR PNG Data URL
+        try {
+          formattedBase64 = await QRCode.toDataURL(rawCode, {
+            errorCorrectionLevel: 'M',
+            margin: 2,
+            width: 360,
+            color: { dark: '#000000', light: '#ffffff' },
+          });
+        } catch (qrErr) {
+          console.error('[EvolutionApi] Failed to render rawCode to QR image:', qrErr);
         }
       }
 
       return {
         success: true,
+        state: state || 'connecting',
+        phone: data?.instance?.owner || data?.owner,
         qr: {
           pairingCode,
-          code: data?.code,
-          base64: data?.base64,
-          count: data?.count,
+          code: rawCode,
+          base64: formattedBase64,
+          count: data?.count || data?.qrcode?.count || 1,
         },
       };
     } catch (err: any) {

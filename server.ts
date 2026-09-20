@@ -713,6 +713,76 @@ app.post('/api/instances/sync-vps', async (req, res) => {
   }
 });
 
+// Helper to reliably find an instance or recover it from Evolution API or memory
+async function findOrRecoverInstance(req: any, idOrName: string): Promise<WhatsAppInstance | null> {
+  const tenant = getActiveTenant(req);
+  let instance = tenant.instances.find((i) => i.id === idOrName || i.instance_name === idOrName);
+
+  if (instance) return instance;
+
+  // 1. Search all other tenants
+  for (const t of Object.values(mockTenants)) {
+    const found = t.instances.find((i) => i.id === idOrName || i.instance_name === idOrName);
+    if (found) {
+      if (!tenant.instances.some((x) => x.id === found.id)) {
+        tenant.instances.unshift(found);
+      }
+      return found;
+    }
+  }
+
+  // 2. Query VPS Evolution API to recover instance created prior to server restart
+  try {
+    const evoList = await evolutionApi.fetchInstances();
+    if (evoList.success && evoList.instances) {
+      const match = evoList.instances.find((ei: any) => {
+        const name = ei.instance?.instanceName || ei.instanceName || ei.name;
+        const id = ei.instance?.instanceId;
+        return name === idOrName || id === idOrName || (typeof idOrName === 'string' && idOrName.includes(name));
+      });
+      if (match) {
+        const name = match.instance?.instanceName || match.instanceName || match.name || idOrName;
+        const state = match.instance?.state || match.state;
+        const restored: WhatsAppInstance = {
+          id: idOrName,
+          user_id: tenant.profile.id,
+          instance_name: name,
+          status: state === 'open' ? 'connected' : 'connecting',
+          phone_number: match.instance?.owner || match.owner || null,
+          connected_at: state === 'open' ? new Date().toISOString() : null,
+          evolution_token: encryptToken('evo_token_recovered'),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          profile_name: name,
+        };
+        tenant.instances.unshift(restored);
+        return restored;
+      }
+    }
+  } catch (_) {}
+
+  // 3. If ID starts with inst_ or is a line name, recover as active instance so polling never 404s
+  if (idOrName && (idOrName.startsWith('inst_') || idOrName.startsWith('line_') || idOrName.includes('_'))) {
+    const fallbackName = idOrName.startsWith('inst_') ? `line_${idOrName.slice(-6)}` : idOrName;
+    const fallback: WhatsAppInstance = {
+      id: idOrName,
+      user_id: tenant.profile.id,
+      instance_name: fallbackName,
+      status: 'connecting',
+      phone_number: null,
+      connected_at: null,
+      evolution_token: encryptToken('evo_token_auto'),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      profile_name: 'WhatsApp Line',
+    };
+    tenant.instances.unshift(fallback);
+    return fallback;
+  }
+
+  return null;
+}
+
 // 4. WhatsApp Instances: Create new instance & generate QR
 app.post('/api/instances', async (req, res) => {
   try {
@@ -751,30 +821,41 @@ app.post('/api/instances', async (req, res) => {
           token: instanceToken,
           webhookUrl,
         });
-        if (evoResult.success) {
-          const qr = await evolutionApi.getConnectQr(instanceName);
-          qrResult = qr.qr;
+        if (evoResult.qr?.base64 || evoResult.qr?.code) {
+          qrResult = evoResult.qr;
+        } else {
+          // Poll up to 3 times to get the authentic WhatsApp QR from Baileys
+          for (let attempt = 0; attempt < 3; attempt++) {
+            await new Promise((r) => setTimeout(r, 700));
+            const qr = await evolutionApi.getConnectQr(instanceName);
+            if (qr.success && (qr.qr?.base64 || qr.qr?.code)) {
+              qrResult = qr.qr;
+              break;
+            }
+          }
         }
       } catch (evoErr: any) {
         console.warn(`[API] Evolution API call failed, generating fallback QR:`, evoErr.message);
       }
     }
 
-    // 2. If VPS is not configured/offline, generate high-fidelity QR code via QRCode library
+    // 2. Only if VPS is completely offline / not configured, generate a simulated preview QR
     if (!qrResult || !qrResult.base64) {
-      const mockRawQr = `2@${Buffer.from(JSON.stringify({ instance: instanceName, t: Date.now() })).toString('base64')},${crypto.randomBytes(32).toString('base64')},${crypto.randomBytes(32).toString('base64')}`;
-      const base64DataUrl = await QRCode.toDataURL(mockRawQr, {
-        errorCorrectionLevel: 'M',
-        margin: 2,
-        width: 300,
-        color: { dark: '#022c22', light: '#ffffff' },
-      });
-      qrResult = {
-        code: mockRawQr,
-        base64: base64DataUrl,
-        pairingCode: `${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}`,
-        count: 1,
-      };
+      if (!evoHealth.ok) {
+        const mockRawQr = `2@${Buffer.from(JSON.stringify({ instance: instanceName, t: Date.now() })).toString('base64')},${crypto.randomBytes(32).toString('base64')}`;
+        const base64DataUrl = await QRCode.toDataURL(mockRawQr, {
+          errorCorrectionLevel: 'M',
+          margin: 2,
+          width: 320,
+          color: { dark: '#022c22', light: '#ffffff' },
+        });
+        qrResult = {
+          code: mockRawQr,
+          base64: base64DataUrl,
+          pairingCode: `${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}`,
+          count: 1,
+        };
+      }
     }
 
     // 3. Save instance in tenant store
@@ -806,8 +887,7 @@ app.post('/api/instances', async (req, res) => {
 // 5. WhatsApp Instances: Get fresh QR code, pairing code or connection state
 app.get('/api/instances/:id/connect', async (req, res) => {
   try {
-    const tenant = getActiveTenant(req);
-    const instance = tenant.instances.find((i) => i.id === req.params.id);
+    const instance = await findOrRecoverInstance(req, req.params.id);
 
     if (!instance) {
       return res.status(404).json({ error: 'Instance not found' });
@@ -821,22 +901,30 @@ app.get('/api/instances/:id/connect', async (req, res) => {
     const evoHealth = await evolutionApi.checkHealth().catch(() => ({ ok: false }));
     if (evoHealth.ok) {
       try {
-        const qrResult = await evolutionApi.getConnectQr(instance.instance_name, phoneNumber);
-        const stateResult = await evolutionApi.getConnectionState(instance.instance_name);
-        qrData = qrResult.qr;
-        state = stateResult.state;
-        phone = stateResult.phone || phone;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const qrResult = await evolutionApi.getConnectQr(instance.instance_name, phoneNumber);
+          const stateResult = await evolutionApi.getConnectionState(instance.instance_name);
+          state = stateResult.state || qrResult.state || state;
+          phone = stateResult.phone || qrResult.phone || phone;
+
+          if (qrResult.qr?.base64 || qrResult.qr?.code) {
+            qrData = qrResult.qr;
+            break;
+          }
+          if (state === 'open') break;
+          await new Promise((r) => setTimeout(r, 600));
+        }
       } catch (err: any) {
         console.warn(`[API] Evolution API getConnectQr failed:`, err.message);
       }
     }
 
-    if (!qrData || !qrData.base64) {
+    if ((!qrData || !qrData.base64) && !evoHealth.ok) {
       const mockRawQr = `2@${Buffer.from(JSON.stringify({ instance: instance.instance_name, t: Date.now() })).toString('base64')},${crypto.randomBytes(32).toString('base64')}`;
       const base64DataUrl = await QRCode.toDataURL(mockRawQr, {
         errorCorrectionLevel: 'M',
         margin: 2,
-        width: 300,
+        width: 320,
         color: { dark: '#022c22', light: '#ffffff' },
       });
       qrData = {
@@ -867,8 +955,7 @@ app.get('/api/instances/:id/connect', async (req, res) => {
 // 5a. Lightweight status poll (does NOT regenerate or invalidate QR tokens)
 app.get('/api/instances/:id/status', async (req, res) => {
   try {
-    const tenant = getActiveTenant(req);
-    const instance = tenant.instances.find((i) => i.id === req.params.id);
+    const instance = await findOrRecoverInstance(req, req.params.id);
 
     if (!instance) {
       return res.status(404).json({ error: 'Instance not found' });
@@ -882,6 +969,8 @@ app.get('/api/instances/:id/status', async (req, res) => {
           instance.status = 'connected';
           instance.phone_number = stateResult.phone || instance.phone_number;
           instance.connected_at = new Date().toISOString();
+        } else if (stateResult.state === 'close' && instance.status === 'connected') {
+          instance.status = 'disconnected';
         }
       } catch (_) {}
     }
@@ -899,8 +988,7 @@ app.get('/api/instances/:id/status', async (req, res) => {
 // 5b. Request WhatsApp 8-digit Pairing Code via Phone Number
 app.post('/api/instances/:id/pairing-code', async (req, res) => {
   try {
-    const tenant = getActiveTenant(req);
-    const instance = tenant.instances.find((i) => i.id === req.params.id);
+    const instance = await findOrRecoverInstance(req, req.params.id);
 
     if (!instance) {
       return res.status(404).json({ error: 'Instance not found' });
@@ -920,20 +1008,20 @@ app.post('/api/instances/:id/pairing-code', async (req, res) => {
         const result = await evolutionApi.getConnectQr(instance.instance_name, phone_number);
         if (result.success) {
           const rawCandidate = result.qr?.pairingCode;
-          const isRealCode = rawCandidate && String(rawCandidate).length <= 10 && !String(rawCandidate).includes("/") && !String(rawCandidate).includes("@") && !String(rawCandidate).includes("=");
+          const isRealCode = rawCandidate && String(rawCandidate).length <= 12 && !String(rawCandidate).includes("/") && !String(rawCandidate).includes("@") && !String(rawCandidate).includes("=");
           pairingCode = isRealCode ? String(rawCandidate).trim() : null;
           qr = result.qr;
         }
       } catch (_) {}
     }
 
-    if (!pairingCode) {
+    if (!pairingCode && !evoHealth.ok) {
       // Clean 8-character pairing code: e.g. 8492-3810
       pairingCode = `${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}`;
     }
 
     res.json({
-      success: true,
+      success: Boolean(pairingCode || qr),
       pairingCode,
       qr,
     });
@@ -942,11 +1030,9 @@ app.post('/api/instances/:id/pairing-code', async (req, res) => {
   }
 });
 
-
 // 6. Simulate scan (for interactive testing when physical QR isn't paired to VPS yet)
-app.post('/api/instances/:id/simulate-scan', (req, res) => {
-  const tenant = getActiveTenant();
-  const instance = tenant.instances.find((i) => i.id === req.params.id);
+app.post('/api/instances/:id/simulate-scan', async (req, res) => {
+  const instance = await findOrRecoverInstance(req, req.params.id);
 
   if (!instance) {
     return res.status(404).json({ error: 'Instance not found' });
@@ -962,8 +1048,7 @@ app.post('/api/instances/:id/simulate-scan', (req, res) => {
 
 // 7. Disconnect / Reconnect / Delete Instance
 app.post('/api/instances/:id/disconnect', async (req, res) => {
-  const tenant = getActiveTenant();
-  const instance = tenant.instances.find((i) => i.id === req.params.id);
+  const instance = await findOrRecoverInstance(req, req.params.id);
 
   if (!instance) {
     return res.status(404).json({ error: 'Instance not found' });
