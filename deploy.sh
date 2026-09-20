@@ -31,7 +31,7 @@ if [ -d ".git" ]; then
 fi
 
 echo "2. Installing node dependencies..."
-npm install --no-audit --no-fund
+npm install --legacy-peer-deps --no-audit --no-fund
 
 echo "3. Building Vite frontend & backend bundle..."
 npm run build

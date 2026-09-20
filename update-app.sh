@@ -95,7 +95,7 @@ else
   # 3a. Install / update dependencies
   echo -e "\n${BOLD}[3/4] Installing dependencies & building production bundle...${NC}"
   if command -v npm &>/dev/null; then
-    npm install --no-audit --no-fund
+    npm install --legacy-peer-deps --no-audit --no-fund
     npm run build
   elif command -v bun &>/dev/null; then
     bun install
