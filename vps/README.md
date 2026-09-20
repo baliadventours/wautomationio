@@ -56,6 +56,28 @@ All services (`evolution_postgres`, `evolution_redis`, `evolution_api`, `evoluti
 
 ---
 
+## 🔄 Running Updates on Webdock / VPS
+
+The automated update script `update.sh`:
+- Creates a timestamped PostgreSQL backup (`backups/evolution_backup_*.sql.gz`) with automatic 7-day retention
+- Pulls the latest Evolution API, PostgreSQL, Redis, and Caddy container images
+- Recreates containers with zero data loss
+- Verifies that the Evolution API healthcheck returns HTTP 200
+- Prunes dangling Docker images to keep your Webdock SSD clean
+
+### Quick One-Liner (Run inside Webdock SSH or Web Terminal):
+```bash
+cd /opt/evolution-api && sudo bash update.sh
+```
+
+### Full OS & Docker Update (Optional):
+To update both the Ubuntu/Debian system packages and the Evolution API stack:
+```bash
+sudo apt update && sudo apt upgrade -y && cd /opt/evolution-api && sudo bash update.sh
+```
+
+---
+
 ## 🧪 Run Smoke Test
 
 Run the automated smoke test script to verify:

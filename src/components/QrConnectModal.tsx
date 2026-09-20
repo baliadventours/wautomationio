@@ -50,6 +50,15 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
   const [errorMessage, setErrorMessage] = useState('');
   const [isSimulating, setIsSimulating] = useState(false);
 
+  // Safe JSON parser to protect against non-JSON error pages
+  const safeJson = async (res: Response) => {
+    try {
+      return await res.json();
+    } catch {
+      return {};
+    }
+  };
+
   // 1. Generate QR Code image data URL if raw code string is provided without base64
   useEffect(() => {
     async function generateQrImage() {
@@ -135,20 +144,20 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
         body: JSON.stringify({ phone_number: cleaned }),
       });
 
-      const data = await res.json();
+      const data = await safeJson(res);
       const isValidCode = (c: any) => Boolean(c && typeof c === 'string' && c.length <= 12 && !c.includes('/') && !c.includes('@') && !c.includes('='));
       
       if (data?.qr) {
         setQrData(data.qr);
       }
 
-      if (res.ok && isValidCode(data.pairingCode)) {
+      if (res.ok && isValidCode(data?.pairingCode)) {
         setPairingCode(data.pairingCode);
         setErrorMessage('');
       } else {
         // Try connect endpoint with number
         const fallbackRes = await fetch(`/api/instances/${instance.id}/connect?number=${cleaned}`);
-        const fallbackData = await fallbackRes.json();
+        const fallbackData = await safeJson(fallbackRes);
         const candidate = fallbackData?.qr?.pairingCode;
         if (fallbackData?.qr) {
           setQrData(fallbackData.qr);
@@ -173,11 +182,11 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
     setErrorMessage('');
     try {
       const res = await fetch(`/api/instances/${instance.id}/connect`);
-      const data = await res.json();
-      if (data.qr) {
+      const data = await safeJson(res);
+      if (data?.qr) {
         setQrData(data.qr);
       }
-      if (data.error) {
+      if (data?.error) {
         setErrorMessage(data.error);
       }
     } catch (e: any) {
@@ -197,8 +206,8 @@ export const QrConnectModal: React.FC<QrConnectModalProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone_number: phoneToUse }),
       });
-      const data = await res.json();
-      if (data.success) {
+      const data = await safeJson(res);
+      if (data?.success) {
         setIsConnected(true);
         setIsPolling(false);
         setTimeout(() => {

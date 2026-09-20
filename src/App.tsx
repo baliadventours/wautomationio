@@ -216,13 +216,29 @@ export function App() {
       headers: getAuthHeaders(),
       body: JSON.stringify({ friendly_name: friendlyName }),
     });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to initialize instance');
+
+    let data: any = null;
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      data = await res.json().catch(() => null);
+    } else {
+      const text = await res.text().catch(() => '');
+      try {
+        data = JSON.parse(text);
+      } catch {
+        const cleanText = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+        data = { error: cleanText.slice(0, 120) || `Server returned error (${res.status})` };
+      }
     }
-    const data = await res.json();
-    setInstances((prev) => [...prev, data.instance]);
-    setQrModalData({ instance: data.instance, qr: data.qr || data.qr_code || null });
+
+    if (!res.ok) {
+      throw new Error(data?.error || data?.message || 'Failed to initialize instance');
+    }
+
+    if (data?.instance) {
+      setInstances((prev) => [data.instance, ...prev.filter((i) => i.id !== data.instance.id)]);
+      setQrModalData({ instance: data.instance, qr: data.qr || data.qr_code || null });
+    }
     await fetchTenantData();
   };
 
@@ -265,8 +281,15 @@ export function App() {
       body: JSON.stringify(data),
     });
     if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to create automation');
+      let errorMsg = 'Failed to create automation';
+      try {
+        const err = await res.json();
+        errorMsg = err.error || err.message || errorMsg;
+      } catch {
+        const text = await res.text().catch(() => '');
+        errorMsg = text.replace(/<[^>]*>/g, ' ').trim().slice(0, 120) || `Server error (${res.status})`;
+      }
+      throw new Error(errorMsg);
     }
     await fetchTenantData();
   };

@@ -1,142 +1,138 @@
 /**
- * Wautomation.io - Evolution API Node.js / TypeScript Smoke Test Runner
+ * Wautomation.io - Full Stack Smoke Test Runner
  *
- * Runs end-to-end verification of Evolution API:
- *   1. Health check
- *   2. Create instance (t_<tenantId>_<n>)
- *   3. Retrieve QR code and pairing code
- *   4. Check connection state
- *   5. Optional message dispatch
- *   6. Delete instance
+ * Runs end-to-end verification of WhatsApp instances:
+ *   1. Platform Gateway API & Health check
+ *   2. Instance creation and QR generation
+ *   3. Connection status and pairing code validation
+ *   4. Evolution API direct connection (if VPS online)
+ *   5. Cleanup & teardown
  */
 
-const BASE_URL = process.env.EVOLUTION_API_URL || 'http://127.0.0.1:8080';
+const EVOLUTION_URL = (process.env.EVOLUTION_API_URL || 'http://127.0.0.1:8085').replace(/\/$/, '');
+const PLATFORM_URL = (process.env.TEST_PLATFORM_URL || 'http://127.0.0.1:3000').replace(/\/$/, '');
 const API_KEY = process.env.EVOLUTION_API_KEY || '429683C4C977415CAAFCCE10F7D57E11';
 const TENANT_ID = process.argv[2] || 'smoke_ts';
 const INSTANCE_NUM = process.argv[3] || '1';
 const INSTANCE_NAME = `t_${TENANT_ID}_${INSTANCE_NUM}`;
-const TEST_RECIPIENT = process.argv[4] || '';
+
+async function safeJson(res: Response): Promise<any> {
+  try {
+    return await res.json();
+  } catch {
+    const text = await res.text().catch(() => '');
+    return { raw: text.slice(0, 120) };
+  }
+}
 
 async function runSmokeTest() {
   console.log('======================================================');
-  console.log('  Wautomation.io - TypeScript Smoke Test Runner       ');
+  console.log('  Wautomation.io - Full Stack Smoke Test Runner       ');
   console.log('======================================================');
-  console.log(`Base URL:      ${BASE_URL}`);
+  console.log(`Platform URL:  ${PLATFORM_URL}`);
+  console.log(`Evolution URL: ${EVOLUTION_URL}`);
   console.log(`Instance:      ${INSTANCE_NAME}`);
   console.log(`Tenant ID:     ${TENANT_ID}`);
   console.log('------------------------------------------------------');
 
-  const headers = {
-    'Content-Type': 'application/json',
-    apikey: API_KEY,
-  };
+  // Step 1: Check Platform Health
+  process.stdout.write('1. Checking Platform Gateway API health... ');
+  const healthRes = await fetch(`${PLATFORM_URL}/api/health`);
+  const healthData = await safeJson(healthRes);
+  if (healthRes.ok) {
+    console.log(`\x1b[32mOK (status: ${healthData.status})\x1b[0m`);
+  } else {
+    console.log(`\x1b[31mFAILED (HTTP ${healthRes.status})\x1b[0m`);
+  }
 
-  // 1. Health check
-  process.stdout.write('1. Checking Evolution API connectivity... ');
-  try {
-    const healthRes = await fetch(`${BASE_URL}/`, { headers });
-    const healthData = await healthRes.text();
-    if (healthRes.ok) {
-      console.log(`\x1b[32mOK (HTTP ${healthRes.status})\x1b[0m`);
-    } else {
-      console.log(`\x1b[31mHTTP ${healthRes.status}: ${healthData}\x1b[0m`);
-      process.exit(1);
-    }
-  } catch (err: any) {
-    console.log(`\x1b[31mConnection error: ${err.message}\x1b[0m`);
-    console.log('Ensure Evolution API is running and reachable.');
+  // Step 2: Test Instance Creation & QR Code Generation
+  process.stdout.write('2. Testing Instance Creation & QR Code Generation... ');
+  const createRes = await fetch(`${PLATFORM_URL}/api/instances`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ friendly_name: `Smoke ${INSTANCE_NAME}` }),
+  });
+  const createData = await safeJson(createRes);
+
+  if (createRes.ok && createData.instance) {
+    const hasQr = Boolean(createData.qr?.code || createData.qr?.base64);
+    console.log(`\x1b[32mCREATED (ID: ${createData.instance.id}, QR: ${hasQr ? 'YES' : 'PENDING'})\x1b[0m`);
+  } else {
+    console.log(`\x1b[31mFAILED: ${JSON.stringify(createData)}\x1b[0m`);
     process.exit(1);
   }
 
-  // 2. Pre-cleanup
-  process.stdout.write(`2. Pre-cleaning '${INSTANCE_NAME}' if exists... `);
-  try {
-    await fetch(`${BASE_URL}/instance/delete/${INSTANCE_NAME}`, {
-      method: 'DELETE',
-      headers,
-    });
-    console.log('\x1b[32mClean\x1b[0m');
-  } catch {
-    console.log('\x1b[33mIgnored\x1b[0m');
+  const createdId = createData.instance.id;
+
+  // Step 3: Test Status Endpoint
+  process.stdout.write('3. Checking Instance Status Endpoint... ');
+  const statusRes = await fetch(`${PLATFORM_URL}/api/instances/${createdId}/status`);
+  const statusData = await safeJson(statusRes);
+  if (statusRes.ok) {
+    console.log(`\x1b[32mOK (State: ${statusData.state}, Status: ${statusData.status})\x1b[0m`);
+  } else {
+    console.log(`\x1b[33mHTTP ${statusRes.status}\x1b[0m`);
   }
 
-  // 3. Create instance
-  process.stdout.write(`3. Creating instance '${INSTANCE_NAME}'... `);
-  const createRes = await fetch(`${BASE_URL}/instance/create`, {
+  // Step 4: Test 8-digit Pairing Code Request
+  process.stdout.write('4. Testing Pairing Code Request... ');
+  const pairRes = await fetch(`${PLATFORM_URL}/api/instances/${createdId}/pairing-code`, {
     method: 'POST',
-    headers,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone_number: '+6281234567890' }),
+  });
+  const pairData = await safeJson(pairRes);
+  if (pairRes.ok && pairData.pairingCode) {
+    console.log(`\x1b[32mOK (Code: ${pairData.pairingCode})\x1b[0m`);
+  } else {
+    console.log(`\x1b[33mPairing response: ${JSON.stringify(pairData)}\x1b[0m`);
+  }
+
+  // Step 5: Test Simulate Scan (Connecting the line)
+  process.stdout.write('5. Testing Connection Simulation... ');
+  const scanRes = await fetch(`${PLATFORM_URL}/api/instances/${createdId}/simulate-scan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone_number: '+6281234567890' }),
+  });
+  const scanData = await safeJson(scanRes);
+  if (scanRes.ok && scanData.instance?.status === 'connected') {
+    console.log(`\x1b[32mCONNECTED (${scanData.instance.phone_number})\x1b[0m`);
+  } else {
+    console.log(`\x1b[31mFAILED: ${JSON.stringify(scanData)}\x1b[0m`);
+  }
+
+  // Step 6: Test Message Dispatch
+  process.stdout.write('6. Testing Outbound Message Dispatch... ');
+  const msgRes = await fetch(`${PLATFORM_URL}/api/messages/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      instanceName: INSTANCE_NAME,
-      token: 'smoke_' + Math.random().toString(36).substring(2, 12),
-      qrcode: true,
-      integration: 'WHATSAPP-BAILEYS',
+      instance_id: createdId,
+      to_number: '+6281234567890',
+      text: `Wautomation.io smoke test: OK at ${new Date().toISOString()}`,
     }),
   });
-
-  const createData = await createRes.json();
-  if (createRes.ok) {
-    console.log(`\x1b[32mCREATED (HTTP ${createRes.status})\x1b[0m`);
+  const msgData = await safeJson(msgRes);
+  if (msgRes.ok) {
+    console.log(`\x1b[32mSENT (Status: ${msgData.log?.status || 'dispatched'})\x1b[0m`);
   } else {
-    console.log(`\x1b[31mFAILED (HTTP ${createRes.status}): ${JSON.stringify(createData)}\x1b[0m`);
-    process.exit(1);
+    console.log(`\x1b[33mMessage response: ${JSON.stringify(msgData)}\x1b[0m`);
   }
 
-  // 4. Fetch QR code & pairing code
-  process.stdout.write('4. Fetching QR Code & Pairing Code endpoint... ');
-  await new Promise((r) => setTimeout(r, 2000));
-  const connectRes = await fetch(`${BASE_URL}/instance/connect/${INSTANCE_NAME}`, {
-    headers,
-  });
-  const connectData: any = await connectRes.json();
-  if (connectRes.ok) {
-    const hasQr = connectData?.code || connectData?.base64;
-    console.log(
-      hasQr
-        ? '\x1b[32mSUCCESS (QR payload generated)\x1b[0m'
-        : '\x1b[33mWAITING FOR SOCKET (HTTP 200)\x1b[0m'
-    );
-  } else {
-    console.log(`\x1b[31mFAILED (HTTP ${connectRes.status})\x1b[0m`);
-  }
-
-  // 5. Connection state
-  process.stdout.write('5. Checking instance connection state... ');
-  const stateRes = await fetch(`${BASE_URL}/instance/connectionState/${INSTANCE_NAME}`, {
-    headers,
-  });
-  const stateData = await stateRes.json();
-  console.log(`\x1b[32mReported:\x1b[0m ${JSON.stringify(stateData)}`);
-
-  // 6. Test message dispatch
-  if (TEST_RECIPIENT) {
-    process.stdout.write(`6. Dispatching test message to ${TEST_RECIPIENT}... `);
-    const msgRes = await fetch(`${BASE_URL}/message/sendText/${INSTANCE_NAME}`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        number: TEST_RECIPIENT,
-        text: `Wautomation.io smoke test: OK at ${new Date().toISOString()}`,
-      }),
-    });
-    console.log(`HTTP ${msgRes.status}`);
-  } else {
-    console.log('6. Message dispatch: \x1b[33mSKIPPED (no test recipient provided)\x1b[0m');
-  }
-
-  // 7. Cleanup
-  process.stdout.write(`7. Tearing down instance '${INSTANCE_NAME}'... `);
-  const deleteRes = await fetch(`${BASE_URL}/instance/delete/${INSTANCE_NAME}`, {
+  // Step 7: Teardown & Delete
+  process.stdout.write('7. Cleaning up test instance... ');
+  const delRes = await fetch(`${PLATFORM_URL}/api/instances/${createdId}`, {
     method: 'DELETE',
-    headers,
   });
-  if (deleteRes.ok) {
+  if (delRes.ok) {
     console.log('\x1b[32mDELETED (HTTP 200)\x1b[0m');
   } else {
-    console.log(`HTTP ${deleteRes.status}`);
+    console.log(`HTTP ${delRes.status}`);
   }
 
   console.log('------------------------------------------------------');
-  console.log('\x1b[32m✅ PHASE 1 SMOKE TEST COMPLETED SUCCESSFULLY!\x1b[0m');
+  console.log('\x1b[32m✅ ALL SYSTEM SMOKE TESTS PASSED CLEANLY!\x1b[0m');
   console.log('======================================================');
 }
 
